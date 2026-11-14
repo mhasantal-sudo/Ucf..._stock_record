@@ -15,6 +15,18 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Prepare Android project directory
+        run: |
+          if [ ! -f "settings.gradle.kts" ] && [ -f "android/settings.gradle.kts" ]; then
+            echo "Copying android/ files to workspace root..."
+            cp -rf android/. .
+          fi
+          if [ ! -f "settings.gradle.kts" ] || [ ! -f "app/build.gradle.kts" ]; then
+            echo "::error::Android project files (settings.gradle.kts) not found!"
+            ls -la
+            exit 1
+          fi
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
@@ -30,7 +42,7 @@ jobs:
           fi
           if [ -n "$WEB_DIR" ]; then
             echo "Building latest web assets from $WEB_DIR..."
-            (cd "$WEB_DIR" && npm install && npm run build)
+            (cd "$WEB_DIR" && npm install --legacy-peer-deps && npm run build)
             if [ -f "app/src/main/assets/web-seed.json" ]; then
               cp "app/src/main/assets/web-seed.json" /tmp/web-seed.json
             fi
