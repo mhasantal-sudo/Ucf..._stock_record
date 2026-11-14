@@ -1,0 +1,66 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build latest web assets from source
+        run: |
+          WEB_DIR=""
+          if [ -f "package.json" ]; then
+            WEB_DIR="."
+          elif [ -f "web-source/package.json" ]; then
+            WEB_DIR="web-source"
+          fi
+          if [ -n "$WEB_DIR" ]; then
+            echo "Building latest web assets from $WEB_DIR..."
+            (cd "$WEB_DIR" && npm install && npm run build)
+            if [ -f "app/src/main/assets/web-seed.json" ]; then
+              cp "app/src/main/assets/web-seed.json" /tmp/web-seed.json
+            fi
+            rm -rf app/src/main/assets
+            mkdir -p app/src/main/assets
+            cp -rf "$WEB_DIR/dist/." app/src/main/assets/
+            if [ -f /tmp/web-seed.json ]; then
+              cp /tmp/web-seed.json app/src/main/assets/web-seed.json
+            fi
+          fi
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Accept Android SDK Licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+
+      - name: Build Debug APK
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: KhaddoBoraddo-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
