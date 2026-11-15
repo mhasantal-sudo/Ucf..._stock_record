@@ -75,6 +75,17 @@ interface PendingProjectsWorkspaceProps {
     id: string,
     target: { category?: AllocationCategory; dcMemo: string }
   ) => ActionResult;
+  onUpdateProject?: (
+    id: string,
+    patch: {
+      projectNo: string;
+      projectName: string;
+      presidentName: string;
+      unionName: string;
+      allocationQty: number;
+    }
+  ) => ActionResult;
+  onDeleteProject?: (id: string) => void;
   onOpenUnoOtherCategory?: (cat: AllocationCategory) => void;
   onOpenDCStage?: (cat: AllocationCategory) => void;
   onBack?: () => void;
@@ -99,6 +110,8 @@ export const PendingProjectsWorkspace: React.FC<PendingProjectsWorkspaceProps> =
   onUpdateUNOSub,
   onDeleteUNOSub,
   onTransferProject,
+  onUpdateProject,
+  onDeleteProject,
   onOpenUnoOtherCategory,
   onOpenDCStage,
   onBack,
@@ -141,6 +154,16 @@ export const PendingProjectsWorkspace: React.FC<PendingProjectsWorkspaceProps> =
     recipient: string;
     unionName: string;
     qty: string;
+  } | null>(null);
+
+  // Editing pending project record itself
+  const [editingProject, setEditingProject] = useState<{
+    id: string;
+    projectNo: string;
+    projectName: string;
+    presidentName: string;
+    unionName: string;
+    allocationQty: string;
   } | null>(null);
 
   // Horizontal swipe pager for sub-tabs
@@ -481,6 +504,7 @@ export const PendingProjectsWorkspace: React.FC<PendingProjectsWorkspaceProps> =
     const p = item.project;
     const isExpanded = expandedProjectId === p.id;
     const isTransferring = transferProjectId === p.id;
+    const isEditingProj = editingProject?.id === p.id;
     const draft = getDraft(item);
     const offset = swipeOffsets[p.id] || 0;
     const targetDcOptions = db.dcAllocations.filter(
@@ -570,10 +594,55 @@ export const PendingProjectsWorkspace: React.FC<PendingProjectsWorkspaceProps> =
                 <span className="text-sm sm:text-base font-extrabold text-[#E2136E]">
                   {formatBnQty(item.pendingQty)} মে.টন
                 </span>
-                <div className="flex items-center gap-1.5">
+                <div className="flex flex-wrap items-center justify-end gap-1.5">
+                  {effectiveUnlocked && onUpdateProject && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setExpandedProjectId(null);
+                        setTransferProjectId(null);
+                        setEditingProject((prev) =>
+                          prev?.id === p.id
+                            ? null
+                            : {
+                                id: p.id,
+                                projectNo: p.projectNo,
+                                projectName: p.projectName,
+                                presidentName: p.presidentName,
+                                unionName: p.unionName,
+                                allocationQty: String(p.allocationQty),
+                              }
+                        );
+                      }}
+                      title="প্রকল্প এডিট করুন"
+                      className="min-h-[40px] inline-flex items-center gap-1 rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 px-2.5 py-1.5 text-xs font-bold text-[#E2136E] cursor-pointer"
+                    >
+                      <Pencil className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                  {effectiveUnlocked && onDeleteProject && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (editingProject?.id === p.id) setEditingProject(null);
+                        onDeleteProject(p.id);
+                        setFeedback({
+                          ok: true,
+                          text: `প্রকল্প ${toBnDigits(p.projectNo)} মুছে ফেলা হয়েছে।`,
+                        });
+                      }}
+                      title="প্রকল্প মুছে ফেলুন"
+                      className="min-h-[40px] inline-flex items-center gap-1 rounded-lg border border-rose-200 bg-white hover:bg-rose-50 px-2.5 py-1.5 text-xs font-bold text-rose-600 cursor-pointer"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  )}
                   <button
                     type="button"
-                    onClick={() => openTransferPanel(item)}
+                    onClick={() => {
+                      setEditingProject(null);
+                      openTransferPanel(item);
+                    }}
                     title="অন্য স্মারক/খাতে স্থানান্তর"
                     className="min-h-[40px] inline-flex items-center gap-1 rounded-lg border border-amber-300 bg-amber-50 hover:bg-amber-100 px-2.5 py-1.5 text-xs font-bold text-amber-900 cursor-pointer"
                   >
@@ -582,7 +651,10 @@ export const PendingProjectsWorkspace: React.FC<PendingProjectsWorkspaceProps> =
                   </button>
                   <button
                     type="button"
-                    onClick={() => handleSelectProject(item)}
+                    onClick={() => {
+                      setEditingProject(null);
+                      handleSelectProject(item);
+                    }}
                     className={`min-h-[40px] inline-flex items-center gap-1 rounded-lg px-3 py-1.5 text-xs font-bold cursor-pointer ${
                       isExpanded
                         ? 'bg-slate-900 text-white'
@@ -594,6 +666,130 @@ export const PendingProjectsWorkspace: React.FC<PendingProjectsWorkspaceProps> =
                 </div>
               </div>
             </div>
+
+            {/* Inline Project Edit Panel */}
+            {isEditingProj && effectiveUnlocked && editingProject && onUpdateProject && (
+              <div className="pt-2.5 border-t border-rose-200 bg-rose-50/50 -mx-3 -mb-3 sm:-mx-3.5 sm:-mb-3.5 p-3 sm:p-3.5 space-y-2.5 text-xs">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-bold text-[#E2136E] flex items-center gap-1.5">
+                    <Pencil className="h-3.5 w-3.5" />
+                    <span>প্রকল্পের তথ্য এডিট করুন</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setEditingProject(null)}
+                    className="p-1 text-slate-500 hover:text-slate-800 cursor-pointer"
+                    aria-label="বাতিল"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-end">
+                  <div className="sm:col-span-3">
+                    <label className="block font-bold text-slate-700 mb-1">প্রকল্প নং</label>
+                    <input
+                      type="text"
+                      value={editingProject.projectNo}
+                      onChange={(e) =>
+                        setEditingProject((prev) =>
+                          prev ? { ...prev, projectNo: e.target.value } : prev
+                        )
+                      }
+                      className="w-full min-h-[38px] rounded-xl border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold"
+                    />
+                  </div>
+                  <div className="sm:col-span-5">
+                    <label className="block font-bold text-slate-700 mb-1">প্রকল্পের নাম</label>
+                    <input
+                      type="text"
+                      value={editingProject.projectName}
+                      onChange={(e) =>
+                        setEditingProject((prev) =>
+                          prev ? { ...prev, projectName: e.target.value } : prev
+                        )
+                      }
+                      className="w-full min-h-[38px] rounded-xl border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold"
+                    />
+                  </div>
+                  <div className="sm:col-span-4">
+                    <label className="block font-bold text-slate-700 mb-1">ইউনিয়ন</label>
+                    <select
+                      value={editingProject.unionName}
+                      onChange={(e) =>
+                        setEditingProject((prev) =>
+                          prev ? { ...prev, unionName: e.target.value } : prev
+                        )
+                      }
+                      className="w-full min-h-[38px] rounded-xl border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold"
+                    >
+                      <option value="">-- ইউনিয়ন --</option>
+                      {Array.from(
+                        new Set([
+                          ...db.officer.unions,
+                          ...(editingProject.unionName ? [editingProject.unionName] : []),
+                        ])
+                      ).map((u) => (
+                        <option key={u} value={u}>
+                          {u}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="sm:col-span-5">
+                    <label className="block font-bold text-slate-700 mb-1">সভাপতি / সম্পাদক</label>
+                    <input
+                      type="text"
+                      value={editingProject.presidentName}
+                      onChange={(e) =>
+                        setEditingProject((prev) =>
+                          prev ? { ...prev, presidentName: e.target.value } : prev
+                        )
+                      }
+                      className="w-full min-h-[38px] rounded-xl border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold"
+                    />
+                  </div>
+                  <div className="sm:col-span-4">
+                    <label className="block font-bold text-slate-700 mb-1">বরাদ্দ (মে.টন)</label>
+                    <input
+                      type="number"
+                      step="0.001"
+                      value={editingProject.allocationQty}
+                      onChange={(e) =>
+                        setEditingProject((prev) =>
+                          prev ? { ...prev, allocationQty: e.target.value } : prev
+                        )
+                      }
+                      className="w-full min-h-[38px] rounded-xl border border-slate-300 bg-white px-2.5 py-1.5 text-right text-xs font-bold tabular-nums"
+                    />
+                  </div>
+                  <div className="sm:col-span-3">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const res = onUpdateProject(p.id, {
+                          projectNo: editingProject.projectNo,
+                          projectName: editingProject.projectName,
+                          presidentName: editingProject.presidentName,
+                          unionName: editingProject.unionName,
+                          allocationQty: parseNum(editingProject.allocationQty),
+                        });
+                        setFeedback({
+                          ok: res.ok,
+                          text: res.ok
+                            ? res.message || 'প্রকল্পের তথ্য হালনাগাদ হয়েছে।'
+                            : res.error || 'হালনাগাদ করা যায়নি।',
+                        });
+                        if (res.ok) setEditingProject(null);
+                      }}
+                      className="w-full min-h-[38px] inline-flex items-center justify-center gap-1 rounded-xl bg-[#E2136E] hover:bg-[#B80D58] text-white font-bold px-3 py-1.5 cursor-pointer"
+                    >
+                      <Check className="h-3.5 w-3.5" />
+                      <span>আপডেট</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* Inline One-by-One Entry & Save Form */}
             {isExpanded && effectiveUnlocked && (
@@ -1326,3 +1522,4 @@ export const PendingProjectsWorkspace: React.FC<PendingProjectsWorkspaceProps> =
     </div>
   );
 };
+

@@ -29,10 +29,13 @@ import {
   formatBnInt,
   formatBnMoney,
   formatBnQty,
+  isChallanOnOrBeforeDo,
+  isSamePartyName,
   normMemoNo,
   parseNum,
   round3,
   toBnDigits,
+  toIsoDateStr,
   todayIsoDate,
 } from '../shared/bnUtils';
 import type { ActionResult } from '../store/useAllocationStore';
@@ -48,12 +51,23 @@ interface DOWorkspaceViewProps {
   embedded?: boolean;
   onBack?: () => void;
   onSaveDOBook: (input: { bookNo: number; startPage: number; endPage: number }) => ActionResult;
+  onUpdateDOBook?: (
+    id: string,
+    input: { bookNo: number; startPage: number; endPage: number }
+  ) => ActionResult;
   onDeleteDOBook: (id: string) => void;
   verifyChallan: (
     category: AllocationCategory,
     dealerName: string,
     qty: number,
-    opts?: { subId?: string; unoDate?: string; unoMemo?: string }
+    opts?: {
+      subId?: string;
+      unoDate?: string;
+      unoMemo?: string;
+      issueDate?: string;
+      excludeDoId?: string;
+      excludeChallanIds?: Set<string>;
+    }
   ) => {
     applicable: boolean;
     ok: boolean;
@@ -97,6 +111,7 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
   embedded = false,
   onBack,
   onSaveDOBook,
+  onUpdateDOBook,
   onDeleteDOBook,
   verifyChallan,
   onIssueDOBatch,
@@ -106,6 +121,7 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
   const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
 
   // DO Book form
+  const [editingBookId, setEditingBookId] = useState<string | null>(null);
   const [bookNo, setBookNo] = useState('');
   const [startPage, setStartPage] = useState('');
   const [endPage, setEndPage] = useState('');
@@ -145,8 +161,27 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
     });
   };
 
+  const resetBookForm = () => {
+    setEditingBookId(null);
+    setBookNo('');
+    setStartPage('');
+    setEndPage('');
+  };
+
   const handleBookSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (editingBookId && onUpdateDOBook) {
+      const res = onUpdateDOBook(editingBookId, {
+        bookNo: parseNum(bookNo),
+        startPage: parseNum(startPage),
+        endPage: parseNum(endPage),
+      });
+      showRes(res);
+      if (res.ok) {
+        resetBookForm();
+      }
+      return;
+    }
     const res = onSaveDOBook({
       bookNo: parseNum(bookNo),
       startPage: parseNum(startPage),
@@ -154,9 +189,7 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
     });
     showRes(res);
     if (res.ok) {
-      setBookNo('');
-      setStartPage('');
-      setEndPage('');
+      resetBookForm();
     }
   };
 
@@ -206,6 +239,38 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
     }
     return groups;
   }, [filteredPending]);
+
+  const previewChecksByKey = useMemo(() => {
+    const map = new Map<string, ReturnType<typeof verifyChallan>>();
+    const usedIds = new Set<string>();
+    const doNumVal = (no: string): number => {
+      const digits = bnToEnDigits(no || '').replace(/\D/g, '');
+      return digits ? Number(digits) : Number.MAX_SAFE_INTEGER;
+    };
+    const ordered = [...filteredPending].sort((a, b) => {
+      const dA = toIsoDateStr(pendingInputs[a.key]?.date || doBatchDate) || '9999-12-31';
+      const dB = toIsoDateStr(pendingInputs[b.key]?.date || doBatchDate) || '9999-12-31';
+      if (dA !== dB) return dA.localeCompare(dB);
+      const uA = toIsoDateStr(a.unoDate) || '9999-12-31';
+      const uB = toIsoDateStr(b.unoDate) || '9999-12-31';
+      if (uA !== uB) return uA.localeCompare(uB);
+      return doNumVal(pendingInputs[a.key]?.doNo || '') - doNumVal(pendingInputs[b.key]?.doNo || '');
+    });
+    for (const p of ordered) {
+      const targetDate = pendingInputs[p.key]?.date || doBatchDate;
+      const check = verifyChallan(p.category, p.recipientName, p.remaining, {
+        subId: p.subId,
+        unoDate: p.unoDate,
+        unoMemo: p.unoMemo,
+        issueDate: targetDate,
+        excludeChallanIds: usedIds,
+      });
+      if (check.mainChallan) usedIds.add(check.mainChallan.id);
+      if (check.taxChallan) usedIds.add(check.taxChallan.id);
+      map.set(p.key, check);
+    }
+    return map;
+  }, [filteredPending, pendingInputs, doBatchDate, verifyChallan]);
 
   const buildUsedDoDraftSet = (
     draftMap: Record<string, { doNo: string; date: string }>
@@ -461,7 +526,20 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
             onSubmit={handleBookSubmit}
             className="lg:col-span-4 rounded-2xl border border-slate-200 bg-white p-4 space-y-3"
           >
-            <div className="text-sm font-bold text-slate-900">নতুন ডিও বই যুক্ত করুন</div>
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-sm font-bold text-slate-900">
+                {editingBookId ? 'ডিও বই এডিট করুন' : 'নতুন ডিও বই যুক্ত করুন'}
+              </div>
+              {editingBookId && (
+                <button
+                  type="button"
+                  onClick={resetBookForm}
+                  className="inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-slate-50 px-2 py-1 text-[11px] font-bold text-slate-700 cursor-pointer"
+                >
+                  <X className="h-3 w-3" /> বাতিল
+                </button>
+              )}
+            </div>
             <div className="space-y-2.5 text-xs">
               <div>
                 <label className="block font-bold text-slate-700 mb-1">বই নম্বর *</label>
@@ -503,7 +581,7 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
               type="submit"
               className="w-full min-h-[44px] rounded-xl bg-[#E2136E] hover:bg-[#B80D58] text-white text-xs font-bold cursor-pointer"
             >
-              ডিও বই সংরক্ষণ করুন
+              {editingBookId ? 'ডিও বই হালনাগাদ করুন' : 'ডিও বই সংরক্ষণ করুন'}
             </button>
 
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs space-y-1 tabular-nums">
@@ -549,20 +627,43 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
                             {formatBnInt(rem)}
                           </td>
                           <td className="py-2 px-3 text-center whitespace-nowrap">
-                            <button
-                              type="button"
-                              onClick={() => setSelectedBookId(b.id)}
-                              className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-bold text-slate-700 mr-1 cursor-pointer"
-                            >
-                              পাতা দেখুন
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => onDeleteDOBook(b.id)}
-                              className="p-1 text-rose-600 hover:bg-rose-50 rounded cursor-pointer"
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </button>
+                            <div className="inline-flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => setSelectedBookId(b.id)}
+                                className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-bold text-slate-700 cursor-pointer"
+                              >
+                                পাতা দেখুন
+                              </button>
+                              {onUpdateDOBook && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setEditingBookId(b.id);
+                                    setBookNo(String(b.bookNo));
+                                    setStartPage(String(b.startPage));
+                                    setEndPage(String(b.endPage));
+                                  }}
+                                  className="p-1.5 text-[#E2136E] hover:bg-rose-50 rounded cursor-pointer"
+                                  title="ডিও বই এডিট করুন"
+                                  aria-label="ডিও বই এডিট করুন"
+                                >
+                                  <Pencil className="h-3.5 w-3.5" />
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (editingBookId === b.id) resetBookForm();
+                                  onDeleteDOBook(b.id);
+                                }}
+                                className="p-1.5 text-rose-600 hover:bg-rose-50 rounded cursor-pointer"
+                                title="ডিও বই মুছুন"
+                                aria-label="ডিও বই মুছুন"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       );
@@ -734,12 +835,15 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
                           </thead>
                           <tbody className="divide-y divide-slate-100">
                             {grp.items.map((p) => {
-                              const check = verifyChallan(p.category, p.recipientName, p.remaining, {
-                                subId: p.subId,
-                                unoDate: p.unoDate,
-                                unoMemo: p.unoMemo,
-                              });
                               const rowDraft = pendingInputs[p.key] || { doNo: '', date: doBatchDate };
+                              const check =
+                                previewChecksByKey.get(p.key) ||
+                                verifyChallan(p.category, p.recipientName, p.remaining, {
+                                  subId: p.subId,
+                                  unoDate: p.unoDate,
+                                  unoMemo: p.unoMemo,
+                                  issueDate: rowDraft.date || doBatchDate,
+                                });
                               const isChecked = Boolean(rowDraft.doNo.trim());
                               const showVerify = verifyTargetKey === p.key;
 
@@ -961,38 +1065,42 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
                           </td>
                           <td className="py-2 px-3 text-[11px] text-slate-700 space-y-0.5">
                             {(() => {
+                              const validForDo = (c: ChallanRecord): boolean =>
+                                c.category === d.category &&
+                                isSamePartyName(c.dealerName, d.recipientName) &&
+                                isChallanOnOrBeforeDo(c.challanDate, d.issueDate, false);
                               const mainRec = d.challanNo
                                 ? db.challans.find(
                                     (c) =>
                                       c.challanType === 'মূল চালান' &&
-                                      normMemoNo(c.challanNo) === normMemoNo(d.challanNo)
+                                      normMemoNo(c.challanNo) === normMemoNo(d.challanNo) &&
+                                      validForDo(c)
                                   )
-                                : d.dealerAllocationId
-                                  ? db.challans.find(
-                                      (c) =>
-                                        c.challanType === 'মূল চালান' &&
-                                        c.dealerAllocationId &&
-                                        normMemoNo(c.dealerAllocationId) === normMemoNo(d.dealerAllocationId)
-                                    )
-                                  : undefined;
+                                : db.challans.find(
+                                    (c) =>
+                                      c.challanType === 'মূল চালান' &&
+                                      c.doNo &&
+                                      normMemoNo(c.doNo) === normMemoNo(d.doNo) &&
+                                      validForDo(c)
+                                  );
                               const taxRec = d.taxChallanNo
                                 ? db.challans.find(
                                     (c) =>
                                       c.challanType === 'আয়কর চালান' &&
-                                      normMemoNo(c.challanNo) === normMemoNo(d.taxChallanNo)
+                                      normMemoNo(c.challanNo) === normMemoNo(d.taxChallanNo) &&
+                                      validForDo(c)
                                   )
-                                : d.dealerAllocationId
-                                  ? db.challans.find(
-                                      (c) =>
-                                        c.challanType === 'আয়কর চালান' &&
-                                        c.dealerAllocationId &&
-                                        normMemoNo(c.dealerAllocationId) === normMemoNo(d.dealerAllocationId)
-                                    )
-                                  : undefined;
-                              const mainNo = d.challanNo || mainRec?.challanNo;
-                              const taxNo = d.taxChallanNo || taxRec?.challanNo;
-                              const mainAmt = d.challanAmount || mainRec?.depositedAmount || 0;
-                              const taxAmt = d.taxChallanAmount || taxRec?.depositedAmount || 0;
+                                : db.challans.find(
+                                    (c) =>
+                                      c.challanType === 'আয়কর চালান' &&
+                                      c.doNo &&
+                                      normMemoNo(c.doNo) === normMemoNo(d.doNo) &&
+                                      validForDo(c)
+                                  );
+                              const mainNo = mainRec?.challanNo || (isChallanOnOrBeforeDo(d.challanDate, d.issueDate, false) ? d.challanNo : undefined);
+                              const taxNo = taxRec?.challanNo || (isChallanOnOrBeforeDo(d.taxChallanDate, d.issueDate, false) ? d.taxChallanNo : undefined);
+                              const mainAmt = mainNo ? (mainRec?.depositedAmount || d.challanAmount || 0) : 0;
+                              const taxAmt = taxNo ? (taxRec?.depositedAmount || d.taxChallanAmount || 0) : 0;
 
                               if (!mainNo && !taxNo && mainAmt <= 0 && taxAmt <= 0) {
                                 return <span className="text-slate-400">—</span>;
@@ -1095,3 +1203,4 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
     </div>
   );
 };
+

@@ -17,7 +17,9 @@ import {
   formatBnInt,
   formatBnMoney,
   formatBnQty,
+  isChallanOnOrBeforeDo,
   isMonthInFiscalUpTo,
+  isSamePartyName,
   memosLikelyMatch,
   namesFuzzyMatch,
   namesLikelyMatch,
@@ -26,6 +28,7 @@ import {
   round2,
   round3,
   toBnDigits,
+  toIsoDateStr,
   unionsLikelyMatch,
 } from './bnUtils';
 
@@ -260,8 +263,9 @@ export function matchDOsToSuballocations(db: AllocationDatabase): {
     }
   };
 
-  // Pass 1: Direct ID / Challan link / ProjectNo / exact UNO memo + recipient
+  // Pass 1: Direct ID / Challan link / ProjectNo / exact UNO memo + recipient (strictly same category)
   runPass((t, d) => {
+    if (d.category !== t.category) return false;
     if (d.dealerAllocationId && normMemoNo(d.dealerAllocationId) === normMemoNo(t.id)) {
       return true;
     }
@@ -269,14 +273,16 @@ export function matchDOsToSuballocations(db: AllocationDatabase): {
     if (
       linkedChallans.some(
         (c) =>
-          (c.doNo && normMemoNo(c.doNo) === normMemoNo(d.doNo)) ||
-          (d.challanNo && normMemoNo(c.challanNo) === normMemoNo(d.challanNo)) ||
-          (d.taxChallanNo && normMemoNo(c.challanNo) === normMemoNo(d.taxChallanNo))
+          (!c.category || c.category === t.category) &&
+          isSamePartyName(c.dealerName || t.recipientName, d.recipientName) &&
+          isChallanOnOrBeforeDo(c.challanDate, d.issueDate, false) &&
+          ((c.doNo && normMemoNo(c.doNo) === normMemoNo(d.doNo)) ||
+            (d.challanNo && normMemoNo(c.challanNo) === normMemoNo(d.challanNo)) ||
+            (d.taxChallanNo && normMemoNo(c.challanNo) === normMemoNo(d.taxChallanNo)))
       )
     ) {
       return true;
     }
-    if (d.category !== t.category) return false;
     if (
       t.projectNo &&
       d.projectNo &&
@@ -477,6 +483,14 @@ export function buildRegisterData(
   const { dosBySubKey } = matchDOsToSuballocations(db);
   const rateMap = new Map(db.rates.map((r) => [r.category, r]));
 
+  const reservedChallanKeysByDo = new Set<string>();
+  for (const d of db.doIssues) {
+    if (d.challanNo) reservedChallanKeysByDo.add(`${normMemoNo(d.challanNo)}::মূল চালান`);
+    if (d.taxChallanNo) reservedChallanKeysByDo.add(`${normMemoNo(d.taxChallanNo)}::আয়কর চালান`);
+  }
+  const usedChallanIdsInReg = new Set<string>();
+  const usedChallanKeysInReg = new Set<string>();
+
   const findMatchingChallanForSub = (
     subId: string,
     subDate: string,
@@ -486,73 +500,76 @@ export function buildRegisterData(
     challanType: 'মূল চালান' | 'আয়কর চালান'
   ): ChallanRecord | undefined => {
     const targetSubNorm = normMemoNo(subId);
-    const bySubId = db.challans.find(
-      (c) =>
-        c.challanType === challanType &&
-        c.dealerAllocationId &&
-        normMemoNo(c.dealerAllocationId) === targetSubNorm
-    );
-    if (bySubId) return bySubId;
+    const isUnusedInReg = (c: ChallanRecord) =>
+      !usedChallanIdsInReg.has(c.id) &&
+      (!c.challanNo || !usedChallanKeysInReg.has(`${normMemoNo(c.challanNo)}::${challanType}`));
+
+    const markUsed = (c: ChallanRecord): ChallanRecord => {
+      usedChallanIdsInReg.add(c.id);
+      if (c.challanNo) usedChallanKeysInReg.add(`${normMemoNo(c.challanNo)}::${challanType}`);
+      return c;
+    };
 
     if (doRec) {
       const targetChallanNo = challanType === 'মূল চালান' ? doRec.challanNo : doRec.taxChallanNo;
       const byDo = db.challans.find(
         (c) =>
           c.challanType === challanType &&
+          c.category === category &&
+          isSamePartyName(c.dealerName || dealerName, dealerName) &&
+          isChallanOnOrBeforeDo(c.challanDate, doRec.issueDate, false) &&
+          isUnusedInReg(c) &&
           ((doRec.doNo && c.doNo && normMemoNo(c.doNo) === normMemoNo(doRec.doNo)) ||
             (targetChallanNo && c.challanNo && normMemoNo(c.challanNo) === normMemoNo(targetChallanNo)))
       );
-      if (byDo) return byDo;
+      if (byDo) return markUsed(byDo);
+      return undefined;
     }
 
-    const catMatches = db.challans.filter(
+    // No DO issued yet: only match an UNUSED challan of the exact same category & dealer
+    const bySubId = db.challans.find(
       (c) =>
         c.challanType === challanType &&
-        (!c.category || c.category === category) &&
-        (!c.dealerAllocationId || normMemoNo(c.dealerAllocationId) === targetSubNorm) &&
-        (namesLikelyMatch(c.dealerName, dealerName) || namesFuzzyMatch(c.dealerName, dealerName))
+        c.category === category &&
+        isSamePartyName(c.dealerName || dealerName, dealerName) &&
+        !c.doNo &&
+        (!c.challanNo || !reservedChallanKeysByDo.has(`${normMemoNo(c.challanNo)}::${challanType}`)) &&
+        isUnusedInReg(c) &&
+        c.dealerAllocationId &&
+        normMemoNo(c.dealerAllocationId) === targetSubNorm
     );
-    const pool =
-      catMatches.length > 0
-        ? catMatches
-        : db.challans.filter(
-            (c) =>
-              c.challanType === challanType &&
-              (!c.dealerAllocationId || normMemoNo(c.dealerAllocationId) === targetSubNorm) &&
-              (namesLikelyMatch(c.dealerName, dealerName) || namesFuzzyMatch(c.dealerName, dealerName))
-          );
+    if (bySubId) return markUsed(bySubId);
+
+    const pool = db.challans.filter(
+      (c) =>
+        c.challanType === challanType &&
+        c.category === category &&
+        isSamePartyName(c.dealerName, dealerName) &&
+        !c.doNo &&
+        (!c.challanNo || !reservedChallanKeysByDo.has(`${normMemoNo(c.challanNo)}::${challanType}`)) &&
+        isUnusedInReg(c) &&
+        (!c.dealerAllocationId || normMemoNo(c.dealerAllocationId) === targetSubNorm)
+    );
     if (pool.length === 0) return undefined;
-    const refDate = doRec?.issueDate || subDate;
-    const within35 = pool.filter((c) => {
-      const cDate = c.challanDate || c.doDate;
-      if (!cDate) return false;
-      return (
-        dateDaysDiff(cDate, subDate) <= 35 ||
-        (doRec?.issueDate ? dateDaysDiff(cDate, doRec.issueDate) <= 35 : false)
-      );
+
+    const withinWindow = pool.filter((c) => {
+      const cDate = c.challanDate;
+      if (!cDate || !subDate) return true;
+      return dateDaysDiff(cDate, subDate) <= 60;
     });
-    const nearby =
-      within35.length > 0
-        ? within35
-        : pool.filter((c) => {
-            const cDate = c.challanDate || c.doDate;
-            if (!cDate) return false;
-            return (
-              dateDaysDiff(cDate, subDate) <= 60 ||
-              (doRec?.issueDate ? dateDaysDiff(cDate, doRec.issueDate) <= 60 : false)
-            );
-          });
-    const searchPool = nearby.length > 0 ? nearby : pool.length === 1 && !subDate ? pool : [];
+    const searchPool = withinWindow.length > 0 ? withinWindow : pool.length === 1 && !subDate ? pool : [];
     if (searchPool.length === 0) return undefined;
-    return [...searchPool].sort((a, b) => {
+
+    const picked = [...searchPool].sort((a, b) => {
+      const aIso = toIsoDateStr(a.challanDate) || '9999-99-99';
+      const bIso = toIsoDateStr(b.challanDate) || '9999-99-99';
+      if (aIso !== bIso) return aIso.localeCompare(bIso);
       const qa = a.allocationQty ? Math.abs(a.allocationQty - subQty) : 999;
       const qb = b.allocationQty ? Math.abs(b.allocationQty - subQty) : 999;
       if (Math.abs(qa - qb) > 0.01) return qa - qb;
-      return (
-        dateDaysDiff(a.challanDate || a.doDate, refDate) -
-        dateDaysDiff(b.challanDate || b.doDate, refDate)
-      );
+      return bnToEnDigits(a.challanNo || '').localeCompare(bnToEnDigits(b.challanNo || ''), undefined, { numeric: true });
     })[0];
+    return picked ? markUsed(picked) : undefined;
   };
 
   const formatDoCell = (doList: DOIssue[]): string => {
@@ -1282,11 +1299,11 @@ function buildChallanRegister(
   const signRule = template?.challanSignRule || 'excess_or_equal';
 
   const columns: RegisterColumnGroup[] = [
-    { label: label('date', 'চালানের তারিখ'), leaf: { key: 'date', label: label('date', 'তারিখ'), align: 'center' } },
-    { label: label('category', 'খাত'), leaf: { key: 'category', label: label('category', 'খাত'), align: 'left' } },
-    { label: label('dealer', 'ডিলার / প্রাপকের নাম'), leaf: { key: 'dealer', label: label('dealer', 'ডিলার / প্রাপক'), align: 'left' } },
     { label: label('doNo', 'ডিও নং ও তারিখ'), leaf: { key: 'doNo', label: label('doNo', 'ডিও নং ও তারিখ'), align: 'center' } },
+    { label: label('dealer', 'ডিলার / প্রাপকের নাম'), leaf: { key: 'dealer', label: label('dealer', 'ডিলার / প্রাপক'), align: 'left' } },
+    { label: label('category', 'খাত'), leaf: { key: 'category', label: label('category', 'খাত'), align: 'left' } },
     { label: label('type', 'চালানের ধরন'), leaf: { key: 'type', label: label('type', 'ধরন'), align: 'center' } },
+    { label: label('date', 'চালানের তারিখ'), leaf: { key: 'date', label: label('date', 'তারিখ'), align: 'center' } },
     { label: label('challanNo', 'চালান নং ও ব্যাংক'), leaf: { key: 'challanNo', label: label('challanNo', 'চালান নং ও ব্যাংক'), align: 'left' } },
     { label: label('recorded', 'রেকর্ড অনুযায়ী টাকা (৳)'), leaf: { key: 'recorded', label: label('recorded', 'রেকর্ড অনুযায়ী টাকা'), align: 'right' } },
     { label: label('deposited', 'জমাকৃত টাকা (৳)'), leaf: { key: 'deposited', label: label('deposited', 'জমাকৃত টাকা'), align: 'right' } },
@@ -1294,150 +1311,251 @@ function buildChallanRegister(
     { label: label('signature', 'স্বাক্ষর'), leaf: { key: 'signature', label: label('signature', 'স্বাক্ষর'), align: 'center', isSignature: true } },
   ];
 
-  const list: ChallanRecord[] = [...db.challans];
-  const seenKey = new Set(
-    list
-      .filter((c) => Boolean(c.challanNo && c.challanNo.trim()))
-      .map((c) => `${normMemoNo(c.challanNo)}::${c.challanType}`)
-  );
+  // Strictly source challan records from the Sheet's Challan tab / db.challans (never fabricate rows from DO issues)
+  // Deduplicate so an already-used challan number (per type) cannot appear twice
+  const dedupMap = new Map<string, ChallanRecord>();
+  for (const c of db.challans) {
+    const chKey = normMemoNo(c.challanNo);
+    const dKey = chKey ? `${chKey}::${c.challanType}` : `id::${c.id}`;
+    if (!dedupMap.has(dKey)) dedupMap.set(dKey, c);
+  }
+  const list: ChallanRecord[] = Array.from(dedupMap.values());
   const rateMap = new Map(db.rates.map((r) => [r.category, r]));
   const subById = new Map(db.dealerSuballocations.map((s) => [s.id.trim(), s]));
 
-  for (const d of db.doIssues) {
-    if (d.challanNo && !seenKey.has(`${normMemoNo(d.challanNo)}::মূল চালান`)) {
-      seenKey.add(`${normMemoNo(d.challanNo)}::মূল চালান`);
-      const rate = rateMap.get(d.category);
-      const sub = db.dealerSuballocations.find(
-        (s) =>
-          s.category === d.category &&
-          normMemoNo(s.unoMemo) === normMemoNo(d.unoMemo) &&
-          namesLikelyMatch(s.dealerName, d.recipientName)
-      );
-      const fallbackRec =
-        d.requiredAmount ||
-        sub?.totalAmount ||
-        round2(d.allocationQty * (rate?.unitPrice || 0)) ||
-        Number(d.challanAmount || 0);
-      list.push({
-        id: `auto-m-${d.id}`,
-        challanNo: d.challanNo,
-        challanDate: d.challanDate || d.issueDate,
-        category: d.category,
-        dealerName: d.recipientName,
-        dealerAllocationId: sub?.id,
-        challanType: 'মূল চালান',
-        bankName: 'ট্রেজারি চালান',
-        doNo: d.doNo,
-        doDate: d.issueDate,
-        allocationQty: d.allocationQty,
-        recordedAmount: fallbackRec,
-        depositedAmount: Number(d.challanAmount || 0),
-        createdAt: d.createdAt,
+  // Strict chronological 1-to-1 matching across ALL challans & DOs:
+  // Same category, same dealer/party, challanDate <= doIssueDate, earliest challan -> earliest DO
+  const sortedAllDos = [...db.doIssues].sort((a, b) => {
+    const da = toIsoDateStr(a.issueDate) || '9999-99-99';
+    const dbDate = toIsoDateStr(b.issueDate) || '9999-99-99';
+    if (da !== dbDate) return da.localeCompare(dbDate);
+    const doCmp = bnToEnDigits(a.doNo || '').localeCompare(bnToEnDigits(b.doNo || ''), undefined, {
+      numeric: true,
+    });
+    if (doCmp !== 0) return doCmp;
+    return (a.createdAt || '').localeCompare(b.createdAt || '');
+  });
+
+  const usedChallanIds = new Set<string>();
+  const usedChallanNoTypes = new Set<string>();
+  const matchedDoByChallanId = new Map<string, DOIssue>();
+
+  for (const type of ['মূল চালান', 'আয়কর চালান'] as const) {
+    for (const d of sortedAllDos) {
+      const dIso = toIsoDateStr(d.issueDate);
+      const targetDoChallanNo = type === 'মূল চালান' ? d.challanNo : d.taxChallanNo;
+
+      const candidates = list.filter((c) => {
+        if (c.challanType !== type) return false;
+        if (usedChallanIds.has(c.id)) return false;
+        const chKey = normMemoNo(c.challanNo);
+        if (chKey && usedChallanNoTypes.has(`${chKey}::${type}`)) return false;
+        if (c.category !== d.category) return false;
+
+        const rawSub = c.dealerAllocationId ? subById.get(c.dealerAllocationId.trim()) : undefined;
+        const validSub =
+          rawSub &&
+          rawSub.category === c.category &&
+          (!c.dealerName || c.dealerName === '—' || isSamePartyName(c.dealerName, rawSub.dealerName))
+            ? rawSub
+            : undefined;
+        const dealerName = (c.dealerName && c.dealerName !== '—' ? c.dealerName : validSub?.dealerName || '').trim();
+        if (!dealerName || !isSamePartyName(dealerName, d.recipientName)) return false;
+
+        const cIso = toIsoDateStr(c.challanDate);
+        if (cIso && dIso) {
+          if (cIso > dIso) return false;
+        } else if (!cIso && dIso) {
+          const explicit =
+            (c.doNo && d.doNo && normMemoNo(c.doNo) === normMemoNo(d.doNo)) ||
+            (d.dealerAllocationId &&
+              c.dealerAllocationId &&
+              normMemoNo(d.dealerAllocationId) === normMemoNo(c.dealerAllocationId)) ||
+            (targetDoChallanNo && chKey && chKey === normMemoNo(targetDoChallanNo));
+          if (!explicit) return false;
+        }
+        return true;
       });
-    }
-    if (d.taxChallanNo && !seenKey.has(`${normMemoNo(d.taxChallanNo)}::আয়কর চালান`)) {
-      seenKey.add(`${normMemoNo(d.taxChallanNo)}::আয়কর চালান`);
-      const rate = rateMap.get(d.category);
-      const effTaxRate = rate && rate.taxRate > 0 ? rate.taxRate : d.category === 'খাদ্য বান্ধব' ? 200 : 0;
-      const sub = db.dealerSuballocations.find(
-        (s) =>
-          s.category === d.category &&
-          normMemoNo(s.unoMemo) === normMemoNo(d.unoMemo) &&
-          namesLikelyMatch(s.dealerName, d.recipientName)
-      );
-      const fallbackTaxRec =
-        d.requiredTaxAmount ||
-        sub?.taxAmount ||
-        round2(d.allocationQty * effTaxRate) ||
-        Number(d.taxChallanAmount || 0);
-      list.push({
-        id: `auto-t-${d.id}`,
-        challanNo: d.taxChallanNo,
-        challanDate: d.taxChallanDate || d.issueDate,
-        category: d.category,
-        dealerName: d.recipientName,
-        dealerAllocationId: sub?.id,
-        challanType: 'আয়কর চালান',
-        bankName: 'আয়কর চালান',
-        doNo: d.doNo,
-        doDate: d.issueDate,
-        allocationQty: d.allocationQty,
-        recordedAmount: fallbackTaxRec,
-        depositedAmount: Number(d.taxChallanAmount || 0),
-        createdAt: d.createdAt,
+
+      if (candidates.length === 0) continue;
+
+      candidates.sort((a, b) => {
+        const aIso = toIsoDateStr(a.challanDate);
+        const bIso = toIsoDateStr(b.challanDate);
+        if (Boolean(aIso) !== Boolean(bIso)) return aIso ? -1 : 1;
+        if (aIso && bIso && aIso !== bIso) return aIso.localeCompare(bIso);
+        const aExplicit =
+          (a.doNo && d.doNo && normMemoNo(a.doNo) === normMemoNo(d.doNo)) ||
+          (targetDoChallanNo && a.challanNo && normMemoNo(a.challanNo) === normMemoNo(targetDoChallanNo))
+            ? 0
+            : 1;
+        const bExplicit =
+          (b.doNo && d.doNo && normMemoNo(b.doNo) === normMemoNo(d.doNo)) ||
+          (targetDoChallanNo && b.challanNo && normMemoNo(b.challanNo) === normMemoNo(targetDoChallanNo))
+            ? 0
+            : 1;
+        if (aExplicit !== bExplicit) return aExplicit - bExplicit;
+        if (d.allocationQty > 0) {
+          const qa = a.allocationQty ? Math.abs(a.allocationQty - d.allocationQty) : 999;
+          const qb = b.allocationQty ? Math.abs(b.allocationQty - d.allocationQty) : 999;
+          if (Math.abs(qa - qb) > 0.01) return qa - qb;
+        }
+        return bnToEnDigits(a.challanNo || '').localeCompare(
+          bnToEnDigits(b.challanNo || ''),
+          undefined,
+          { numeric: true }
+        );
       });
+
+      const best = candidates[0];
+      usedChallanIds.add(best.id);
+      const bKey = normMemoNo(best.challanNo);
+      if (bKey) usedChallanNoTypes.add(`${bKey}::${type}`);
+      matchedDoByChallanId.set(best.id, d);
     }
   }
 
-  const filtered = list
-    .filter((c) => inDateRange(c.challanDate, startDate, endDate))
-    .sort((a, b) => a.challanDate.localeCompare(b.challanDate));
+  const doNoExistsSet = new Set(db.doIssues.map((d) => normMemoNo(d.doNo)).filter(Boolean));
+  const filtered = list.filter((c) => inDateRange(c.challanDate, startDate, endDate));
+  const monthKey = (iso?: string) => {
+    const s = toIsoDateStr(iso);
+    return s ? s.slice(0, 7) : '';
+  };
 
-  const monthKey = (iso?: string) => (/^\d{4}-\d{2}/.test((iso || '').trim()) ? (iso || '').trim().slice(0, 7) : '');
+  interface ResolvedChallanItem {
+    c: ChallanRecord;
+    directSub?: (typeof db.dealerSuballocations)[number];
+    dealerName: string;
+    refMonth: string;
+    matchedDo?: DOIssue;
+    resolvedDoNo: string;
+    resolvedDoDate: string;
+  }
 
-  const rows: RegisterRowData[] = filtered.map((c) => {
-    const directSub = c.dealerAllocationId ? subById.get(c.dealerAllocationId.trim()) : undefined;
-    const dealerName = c.dealerName || directSub?.dealerName || '—';
+  const resolvedItems: ResolvedChallanItem[] = filtered.map((c) => {
+    const rawSub = c.dealerAllocationId ? subById.get(c.dealerAllocationId.trim()) : undefined;
+    const directSub =
+      rawSub &&
+      rawSub.category === c.category &&
+      (!c.dealerName || c.dealerName === '—' || isSamePartyName(c.dealerName, rawSub.dealerName))
+        ? rawSub
+        : undefined;
+    const matchedDo = matchedDoByChallanId.get(c.id);
+    const dealerName = (
+      (c.dealerName && c.dealerName !== '—' ? c.dealerName : '') ||
+      directSub?.dealerName ||
+      matchedDo?.recipientName ||
+      '—'
+    ).trim();
     const refDate = c.challanDate || directSub?.unoDate || '';
     const refMonth = monthKey(refDate);
 
-    let matchedDo =
-      (c.doNo && db.doIssues.find((d) => normMemoNo(d.doNo) === normMemoNo(c.doNo))) ||
-      (c.challanNo
-        ? db.doIssues.find(
-            (d) =>
-              (c.challanType === 'মূল চালান' &&
-                d.challanNo &&
-                normMemoNo(d.challanNo) === normMemoNo(c.challanNo)) ||
-              (c.challanType === 'আয়কর চালান' &&
-                d.taxChallanNo &&
-                normMemoNo(d.taxChallanNo) === normMemoNo(c.challanNo))
-          )
-        : undefined);
-
-    if (!matchedDo && directSub) {
-      const subPool = db.doIssues.filter(
-        (d) => d.category === directSub.category && namesLikelyMatch(d.recipientName, directSub.dealerName)
-      );
-      matchedDo =
-        (directSub.unoMemo
-          ? subPool.find((d) => normMemoNo(d.unoMemo) === normMemoNo(directSub.unoMemo))
-          : undefined) ||
-        (refMonth ? subPool.find((d) => monthKey(d.issueDate) === refMonth) : undefined);
+    let resolvedDoNo = '';
+    let resolvedDoDate = '';
+    if (matchedDo) {
+      resolvedDoNo = (matchedDo.doNo || '').trim();
+      resolvedDoDate = (matchedDo.issueDate || '').trim();
+    } else if (c.doNo && !doNoExistsSet.has(normMemoNo(c.doNo))) {
+      // Unsynced external DO number written directly on Challan sheet (only keep if date valid)
+      if (isChallanOnOrBeforeDo(c.challanDate, c.doDate, false)) {
+        resolvedDoNo = c.doNo.trim();
+        resolvedDoDate = (c.doDate || '').trim();
+      }
     }
 
-    if (!matchedDo && dealerName !== '—') {
-      const dealerPool = db.doIssues.filter(
-        (d) => d.category === c.category && namesLikelyMatch(d.recipientName, dealerName)
-      );
-      const sameMonth = refMonth
-        ? dealerPool.filter((d) => monthKey(d.issueDate) === refMonth)
-        : [];
-      const qtyPool = sameMonth.length > 0 ? sameMonth : dealerPool.length === 1 ? dealerPool : [];
-      matchedDo =
-        (c.allocationQty && qtyPool.length > 1
-          ? [...qtyPool].sort(
-              (a, b) =>
-                Math.abs((a.allocationQty || 0) - c.allocationQty!) -
-                Math.abs((b.allocationQty || 0) - c.allocationQty!)
-            )[0]
-          : qtyPool[0]) || undefined;
+    return {
+      c,
+      directSub,
+      dealerName,
+      refMonth,
+      matchedDo,
+      resolvedDoNo,
+      resolvedDoDate,
+    };
+  });
+
+  // Normalize canonical DO display / date & group metadata so Main & Tax rows of the same DO share identical groupValues
+  const groupMeta = new Map<
+    string,
+    { sortDate: string; doNo: string; doDate: string; dealerDisplay: string }
+  >();
+  const getGroupKey = (item: ResolvedChallanItem) =>
+    item.resolvedDoNo
+      ? `do::${normMemoNo(item.resolvedDoNo)}::${item.c.category}`
+      : `nodo::${item.c.id}`;
+
+  for (const item of resolvedItems) {
+    const gk = getGroupKey(item);
+    const cur = groupMeta.get(gk);
+    const candDate = toIsoDateStr(item.resolvedDoDate || item.c.challanDate) || '9999-99-99';
+    if (!cur) {
+      groupMeta.set(gk, {
+        sortDate: candDate,
+        doNo: item.resolvedDoNo,
+        doDate: item.resolvedDoDate,
+        dealerDisplay: item.dealerName,
+      });
+    } else {
+      if (candDate < cur.sortDate) cur.sortDate = candDate;
+      if (!cur.doDate && item.resolvedDoDate) cur.doDate = item.resolvedDoDate;
+      if (cur.dealerDisplay === '—' && item.dealerName !== '—') {
+        cur.dealerDisplay = item.dealerName;
+      }
     }
+  }
+
+  resolvedItems.sort((a, b) => {
+    const gkA = getGroupKey(a);
+    const gkB = getGroupKey(b);
+    if (gkA !== gkB) {
+      const metaA = groupMeta.get(gkA)!;
+      const metaB = groupMeta.get(gkB)!;
+      const dateCmp = metaA.sortDate.localeCompare(metaB.sortDate);
+      if (dateCmp !== 0) return dateCmp;
+      const doCmp = bnToEnDigits(metaA.doNo || '').localeCompare(
+        bnToEnDigits(metaB.doNo || ''),
+        undefined,
+        { numeric: true }
+      );
+      if (doCmp !== 0) return doCmp;
+      return gkA.localeCompare(gkB);
+    }
+    const typeRankA = a.c.challanType === 'মূল চালান' ? 0 : 1;
+    const typeRankB = b.c.challanType === 'মূল চালান' ? 0 : 1;
+    if (typeRankA !== typeRankB) return typeRankA - typeRankB;
+    const chDateCmp = (toIsoDateStr(a.c.challanDate) || '').localeCompare(
+      toIsoDateStr(b.c.challanDate) || ''
+    );
+    if (chDateCmp !== 0) return chDateCmp;
+    return bnToEnDigits(a.c.challanNo || '').localeCompare(
+      bnToEnDigits(b.c.challanNo || ''),
+      undefined,
+      { numeric: true }
+    );
+  });
+
+  const rows: RegisterRowData[] = resolvedItems.map((item) => {
+    const { c, directSub, dealerName, refMonth, matchedDo } = item;
+    const gk = getGroupKey(item);
+    const gMeta = groupMeta.get(gk)!;
+    const effDealer = item.resolvedDoNo ? gMeta.dealerDisplay : dealerName;
+    const effDoNo = item.resolvedDoNo ? gMeta.doNo : '';
+    const effDoDate = item.resolvedDoNo ? gMeta.doDate : item.resolvedDoDate;
 
     let recVal = c.recordedAmount;
     if (recVal <= 0) {
       const sameMonthSub =
-        !directSub && dealerName !== '—'
+        !directSub && effDealer !== '—'
           ? db.dealerSuballocations.find(
               (s) =>
-                s.category === (matchedDo?.category || c.category) &&
-                namesLikelyMatch(s.dealerName, dealerName) &&
+                s.category === c.category &&
+                isSamePartyName(s.dealerName, effDealer) &&
                 ((matchedDo?.unoMemo && normMemoNo(s.unoMemo) === normMemoNo(matchedDo.unoMemo)) ||
                   (refMonth && monthKey(s.unoDate) === refMonth))
             )
           : undefined;
       const matchedSub = directSub || sameMonthSub;
-      const effCat = matchedDo?.category || matchedSub?.category || c.category;
+      const effCat = c.category;
       const rate = rateMap.get(effCat);
       const effUnitPrice = rate && rate.unitPrice > 0 ? rate.unitPrice : effCat === 'খাদ্য বান্ধব' ? 13000 : 0;
       const effTaxRate = rate && rate.taxRate > 0 ? rate.taxRate : effCat === 'খাদ্য বান্ধব' ? 200 : 0;
@@ -1472,23 +1590,21 @@ function buildChallanRegister(
       mismatchStr = `-${formatBnMoney(Math.abs(diff))} (কম জমা)`;
     }
 
-    const resolvedDoNo = c.doNo || matchedDo?.doNo || '';
-    const resolvedDoDate = c.doDate || matchedDo?.issueDate || '';
-    const doDisplay = resolvedDoNo
-      ? resolvedDoDate
-        ? `ডিও- ${toBnDigits(resolvedDoNo)}\nতাং- ${formatBnDate(resolvedDoDate)}`
-        : `ডিও- ${toBnDigits(resolvedDoNo)}`
+    const doDisplay = effDoNo
+      ? effDoDate
+        ? `ডিও- ${toBnDigits(effDoNo)}\nতাং- ${formatBnDate(effDoDate)}`
+        : `ডিও- ${toBnDigits(effDoNo)}`
       : '—';
 
     return {
       id: c.id,
-      groupValues: [],
+      groupValues: effDoNo ? [doDisplay, effDealer, c.category] : ['', '', ''],
       cells: {
-        date: formatBnDate(c.challanDate),
-        category: c.category,
-        dealer: dealerName,
         doNo: doDisplay,
+        dealer: effDealer,
+        category: c.category,
         type: c.challanType,
+        date: formatBnDate(c.challanDate),
         challanNo: `${toBnDigits(c.challanNo)}${c.bankName ? `\n(${c.bankName})` : ''}`,
         recorded: formatBnMoney(rec),
         deposited: formatBnMoney(dep),
@@ -1506,7 +1622,7 @@ function buildChallanRegister(
     title: 'চালান রেজিস্টার',
     columns,
     leaves,
-    mergeDepth: 0,
+    mergeDepth: 3,
     colWidths: computeRegisterColWidths(leaves, true),
     tableLayoutFixed: true,
     rows,
@@ -1613,6 +1729,88 @@ export function buildMonthlyDistributionReport(
   return { fiscalYear: fy, monthName: BENGALI_MONTHS[month0] || '', rows, totals };
 }
 
+export interface AllocationSummaryRow {
+  category: AllocationCategory;
+  categoryBn: string;
+  grain: string;
+  requiresDC: boolean;
+  ministryQty: number;
+  dcQty: number | null;
+  subQty: number;
+  projectQty: number;
+  doQty: number;
+  unissuedQty: number;
+}
+
+export function buildAllocationSummaryReport(
+  db: AllocationDatabase,
+  categoryFilter: string
+) {
+  const targetCats =
+    categoryFilter && categoryFilter !== 'ALL'
+      ? CATEGORIES.filter((c) => c.category === categoryFilter)
+      : CATEGORIES;
+
+  const rows: AllocationSummaryRow[] = targetCats.map((meta) => {
+    const minItems = db.ministryAllocations.filter((m) => m.category === meta.category);
+    const ministryQty = round3(
+      minItems.reduce((s, m) => s + (Number(m.allocationQty) || 0), 0)
+    );
+    const dcRaw = db.dcAllocations
+      .filter((d) => d.category === meta.category)
+      .reduce((s, d) => s + (Number(d.allocationQty) || 0), 0);
+    const dcQty = meta.requiresDC ? round3(dcRaw) : null;
+    const subQty = round3(
+      db.dealerSuballocations
+        .filter((s) => s.category === meta.category)
+        .reduce((acc, s) => acc + (Number(s.allocationQty) || 0), 0) +
+        db.unoSuballocations
+          .filter((u) => u.category === meta.category)
+          .reduce((acc, u) => acc + (Number(u.allocationQty) || 0), 0)
+    );
+    const projectQty = round3(
+      db.projects
+        .filter((p) => p.category === meta.category)
+        .reduce((acc, p) => acc + (Number(p.allocationQty) || 0), 0)
+    );
+    const doQty = round3(
+      db.doIssues
+        .filter((d) => d.category === meta.category)
+        .reduce((acc, d) => acc + (Number(d.allocationQty) || 0), 0)
+    );
+    const baseAlloc = Math.max(ministryQty, dcQty ?? 0, subQty, projectQty);
+    const unissuedQty = Math.max(0, round3(baseAlloc - doQty));
+    const grain = minItems[0]?.grain || meta.defaultGrain || 'চাল';
+
+    return {
+      category: meta.category,
+      categoryBn: meta.category,
+      grain,
+      requiresDC: meta.requiresDC,
+      ministryQty,
+      dcQty,
+      subQty,
+      projectQty,
+      doQty,
+      unissuedQty,
+    };
+  });
+
+  const totals = rows.reduce(
+    (acc, r) => ({
+      ministryQty: round3(acc.ministryQty + r.ministryQty),
+      dcQty: round3(acc.dcQty + (r.dcQty ?? 0)),
+      subQty: round3(acc.subQty + r.subQty),
+      projectQty: round3(acc.projectQty + r.projectQty),
+      doQty: round3(acc.doQty + r.doQty),
+      unissuedQty: round3(acc.unissuedQty + r.unissuedQty),
+    }),
+    { ministryQty: 0, dcQty: 0, subQty: 0, projectQty: 0, doQty: 0, unissuedQty: 0 }
+  );
+
+  return { rows, totals };
+}
+
 export function buildCashSaleReport(db: AllocationDatabase, month0: number, year: number) {
   const rateMap = new Map(db.rates.map((r) => [r.category, r]));
   const grainMap = new Map(
@@ -1637,6 +1835,12 @@ export function buildCashSaleReport(db: AllocationDatabase, month0: number, year
     amount: number;
   }> = [];
 
+  const allMainChallanNos = new Set(
+    db.challans
+      .filter((c) => c.challanType === 'মূল চালান' && c.challanNo)
+      .map((c) => normMemoNo(c.challanNo))
+  );
+
   for (const channel of CHALLAN_CATEGORIES) {
     const rateRec = rateMap.get(channel);
     const configuredRate =
@@ -1645,6 +1849,16 @@ export function buildCashSaleReport(db: AllocationDatabase, month0: number, year
         : channel === 'খাদ্য বান্ধব'
           ? 13000
           : 0;
+
+    // Supplied quantity strictly equals total DO issues for this category in the selected month
+    const channelMonthlyDos = db.doIssues.filter((d) => {
+      if (d.category !== channel) return false;
+      const my = parseMonthYear(d.issueDate);
+      return Boolean(my && my.year === year && my.month === month0);
+    });
+    const doTotalQty = round3(
+      channelMonthlyDos.reduce((s, d) => s + (Number(d.allocationQty) || 0), 0)
+    );
 
     const items: CashChallanItem[] = [];
     const seenChallanNos = new Set<string>();
@@ -1662,6 +1876,8 @@ export function buildCashSaleReport(db: AllocationDatabase, month0: number, year
       const matchedDo = db.doIssues.find(
         (d) =>
           d.category === channel &&
+          (!c.dealerName || isSamePartyName(c.dealerName, d.recipientName)) &&
+          isChallanOnOrBeforeDo(c.challanDate, d.issueDate, false) &&
           ((c.doNo && d.doNo && normMemoNo(d.doNo) === normMemoNo(c.doNo)) ||
             (chKey && d.challanNo && normMemoNo(d.challanNo) === chKey) ||
             (c.dealerAllocationId &&
@@ -1694,7 +1910,7 @@ export function buildCashSaleReport(db: AllocationDatabase, month0: number, year
       });
     }
 
-    // Include main challans recorded directly on DOIssue if not already present in db.challans
+    // Include main challans recorded directly on DOIssue only if not present anywhere in db.challans
     for (const d of db.doIssues) {
       if (d.category !== channel) continue;
       if (!d.challanNo && !(d.challanAmount && d.challanAmount > 0)) continue;
@@ -1703,7 +1919,7 @@ export function buildCashSaleReport(db: AllocationDatabase, month0: number, year
       if (!my || my.year !== year || my.month !== month0) continue;
 
       const chKey = normMemoNo(d.challanNo);
-      if (chKey && seenChallanNos.has(chKey)) continue;
+      if (chKey && (seenChallanNos.has(chKey) || allMainChallanNos.has(chKey))) continue;
       if (chKey) seenChallanNos.add(chKey);
 
       const amount = round2(
@@ -1727,7 +1943,7 @@ export function buildCashSaleReport(db: AllocationDatabase, month0: number, year
       });
     }
 
-    if (items.length === 0) continue;
+    if (items.length === 0 && doTotalQty <= 0) continue;
 
     items.sort((a, b) => {
       const dc = (a.challanDate || '').localeCompare(b.challanDate || '');
@@ -1737,13 +1953,12 @@ export function buildCashSaleReport(db: AllocationDatabase, month0: number, year
       });
     });
 
-    const totalChannelQty = round3(items.reduce((s, it) => s + it.qty, 0));
     const totalChannelAmt = round2(items.reduce((s, it) => s + it.amount, 0));
     const effRate =
       configuredRate > 0
         ? configuredRate
-        : totalChannelQty > 0
-          ? round2(totalChannelAmt / totalChannelQty)
+        : doTotalQty > 0 && totalChannelAmt > 0
+          ? round2(totalChannelAmt / doTotalQty)
           : 0;
 
     const challanEntries = items.map((it) => {
@@ -1757,10 +1972,18 @@ export function buildCashSaleReport(db: AllocationDatabase, month0: number, year
     }
     const challanListText = challanLines.join('\n');
 
+    const firstDoGrain = channelMonthlyDos
+      .map((d) => grainMap.get(`${channel}::${normMemoNo(d.ministryMemo)}`))
+      .find(Boolean);
+
     rows.push({
       channel,
-      product: items[0]?.grain || CATEGORY_BY_NAME[channel]?.defaultGrain || 'চাল',
-      suppliedQuantity: totalChannelQty,
+      product:
+        firstDoGrain ||
+        items[0]?.grain ||
+        CATEGORY_BY_NAME[channel]?.defaultGrain ||
+        'চাল',
+      suppliedQuantity: doTotalQty,
       rate: effRate,
       challan: challanListText || '—',
       amount: totalChannelAmt,
@@ -1950,3 +2173,4 @@ export function getPendingDORecipients(db: AllocationDatabase) {
 
   return out;
 }
+

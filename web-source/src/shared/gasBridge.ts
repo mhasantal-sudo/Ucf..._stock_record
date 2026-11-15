@@ -166,6 +166,45 @@ export function callAndroidNativeHttp(
   });
 }
 
+async function directBrowserGasFetch<T>(
+  targetUrl: string,
+  action: string,
+  payload: Record<string, unknown>
+): Promise<GasProxyResult<T>> {
+  let res: Response;
+  if (action === 'getAppData') {
+    const u = new URL(targetUrl);
+    u.searchParams.set('api', '1');
+    u.searchParams.set('action', 'getAppData');
+    if (payload.fy) u.searchParams.set('fy', String(payload.fy));
+    res = await fetch(u.toString(), { method: 'GET', redirect: 'follow' });
+  } else {
+    res = await fetch(targetUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action, payload }),
+      redirect: 'follow',
+    });
+  }
+  const text = await res.text();
+  if (text.trim().startsWith('<')) {
+    return {
+      ok: false,
+      code: 'HTML_NOT_JSON',
+      error:
+        'Apps Script Web App থেকে JSON-এর বদলে HTML এসেছে। Deploy → Manage deployments থেকে Who has access: Anyone এবং Version: New version দিয়ে ডিপ্লয় করুন।',
+    };
+  }
+  const parsed = JSON.parse(text) as GasProxyResult<T> & Partial<GasAppData>;
+  if (parsed && parsed.ok === false) {
+    return { ok: false, code: 'API_ERROR', error: parsed.error || 'অ্যাপ স্ক্রিপ্ট ত্রুটি' };
+  }
+  if (parsed && 'data' in parsed && parsed.data !== undefined) {
+    return { ok: true, data: parsed.data, message: parsed.message };
+  }
+  return { ok: true, data: parsed as unknown as T, message: parsed.message };
+}
+
 export async function callGasAction<T = unknown>(
   url: string,
   action: string,
@@ -205,55 +244,55 @@ export async function callGasAction<T = unknown>(
           };
         }
         text = nativeRes.text;
-      } else {
-        let res: Response;
-        if (action === 'getAppData') {
-          const u = new URL(targetUrl);
-          u.searchParams.set('api', '1');
-          u.searchParams.set('action', 'getAppData');
-          if (payload.fy) u.searchParams.set('fy', String(payload.fy));
-          res = await fetch(u.toString(), { method: 'GET', redirect: 'follow' });
-        } else {
-          res = await fetch(targetUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-            body: JSON.stringify({ action, payload }),
-            redirect: 'follow',
-          });
+        if (text.trim().startsWith('<')) {
+          return {
+            ok: false,
+            code: 'HTML_NOT_JSON',
+            error: 'মেইন ওয়েব অ্যাপে Code.gs JSON ব্রিজ এখনো যুক্ত করা হয়নি।',
+          };
         }
-        text = await res.text();
+        const parsed = JSON.parse(text) as GasProxyResult<T> & Partial<GasAppData>;
+        if (parsed && parsed.ok === false) {
+          return { ok: false, code: 'API_ERROR', error: parsed.error || 'অ্যাপ স্ক্রিপ্ট ত্রুটি' };
+        }
+        if (parsed && 'data' in parsed && parsed.data !== undefined) {
+          return { ok: true, data: parsed.data, message: parsed.message };
+        }
+        return { ok: true, data: parsed as unknown as T, message: parsed.message };
       }
 
-      if (text.trim().startsWith('<')) {
-        return {
-          ok: false,
-          code: 'HTML_NOT_JSON',
-          error: 'মেইন ওয়েব অ্যাপে Code.gs JSON ব্রিজ এখনো যুক্ত করা হয়নি।',
-        };
-      }
-      const parsed = JSON.parse(text) as GasProxyResult<T> & Partial<GasAppData>;
-      if (parsed && parsed.ok === false) {
-        return { ok: false, code: 'API_ERROR', error: parsed.error || 'অ্যাপ স্ক্রিপ্ট ত্রুটি' };
-      }
-      if (parsed && 'data' in parsed && parsed.data !== undefined) {
-        return { ok: true, data: parsed.data, message: parsed.message };
-      }
-      return { ok: true, data: parsed as unknown as T, message: parsed.message };
+      return await directBrowserGasFetch<T>(targetUrl, action, payload);
     }
 
-    const res = await fetch('/api/gas-proxy', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: targetUrl, action, payload }),
-    });
+    try {
+      const res = await fetch('/api/gas-proxy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: targetUrl, action, payload }),
+      });
 
-    const json = (await res.json()) as GasProxyResult<T>;
-    return json;
+      if (res.ok) {
+        const contentType = res.headers.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+          return (await res.json()) as GasProxyResult<T>;
+        }
+      }
+    } catch {
+      // Proxy unreachable (e.g. server restarting or standalone PWA); fall back to direct CORS-simple POST
+    }
+
+    return await directBrowserGasFetch<T>(targetUrl, action, payload);
   } catch (err) {
+    const rawMsg = err instanceof Error ? err.message : '';
+    const friendly =
+      !rawMsg || /failed to fetch/i.test(rawMsg)
+        ? 'নেটওয়ার্ক বা সার্ভার সংযোগ ব্যর্থ হয়েছে (Failed to fetch) — ইন্টারনেট চালু আছে কি না ও পেজটি একবার Reload করে আবার চেষ্টা করুন; Apps Script লিংকটি সঠিক /exec URL এবং Who has access: Anyone কি না দেখুন।'
+        : rawMsg;
     return {
       ok: false,
       code: 'NETWORK_ERROR',
-      error: err instanceof Error ? err.message : 'নেটওয়ার্ক সংযোগ ব্যর্থ হয়েছে।',
+      error: friendly,
     };
   }
 }
+

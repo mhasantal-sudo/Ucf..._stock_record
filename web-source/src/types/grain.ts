@@ -525,3 +525,4 @@ export interface SheetWriteConfirmRequest {
   isDestructive?: boolean;
   confirmLabel?: string;
 }
+

@@ -17,9 +17,9 @@ export const GOOGLE_WORKSPACE_SCOPES = [
 
 export const GOOGLE_AUTH_PROJECT_ID = firebaseConfig.projectId || '';
 export const LIVE_PWA_APP_URL =
-  'https://ais-pre-hj7xd2hrjws6ngp5c3qqea-1001837723305.asia-east1.run.app';
+  'https://ais-pre-v77c74ngmmljzsnq2hzggt-222504639342.asia-northeast1.run.app';
 export const DEV_PWA_APP_URL =
-  'https://ais-dev-hj7xd2hrjws6ngp5c3qqea-1001837723305.asia-east1.run.app';
+  'https://ais-dev-v77c74ngmmljzsnq2hzggt-222504639342.asia-northeast1.run.app';
 
 export function getApiBaseOrigin(): string {
   if (typeof window === 'undefined') return '';
@@ -198,8 +198,11 @@ export async function resolveReachablePwaOrigin(): Promise<string> {
   }
 
   try {
-    const devProbe = await callAndroidNativeHttp('GET', `${DEV_PWA_APP_URL}/`);
-    if (devProbe.status >= 200 && devProbe.status < 400) {
+    const devProbe = await callAndroidNativeHttp(
+      'GET',
+      `${DEV_PWA_APP_URL}/api/android-auth/consume?state=preflight-check`
+    );
+    if (devProbe.ok && devProbe.status === 200 && devProbe.text.includes('"pending"')) {
       return DEV_PWA_APP_URL;
     }
   } catch {
@@ -223,8 +226,18 @@ export async function resolveReachablePwaOrigin(): Promise<string> {
   }
 
   throw new Error(
-    `লাইভ ওয়েব অ্যাপ (${LIVE_PWA_APP_URL}) এখনো পাবলিশ/শেয়ার করা হয়নি (404)। অনুগ্রহ করে Google AI Studio থেকে অ্যাপটি Share/Publish করুন অথবা নিচের Apps Script লিংক দিয়ে শিট সিঙ্ক করুন।`
+    `Google Sign-In ব্রিজ (${LIVE_PWA_APP_URL}) সংযোগ করা যায়নি। নিচের «৪. মূল শিট Save/Push Apps Script URL» ব্যবহার করলে গুগল লগইন ছাড়াই সব এন্ট্রি সরাসরি Google Sheet-এ সেভ হবে!`
   );
+}
+
+let activeAndroidAuthCancel: (() => void) | null = null;
+
+export function cancelPendingAndroidSignIn(): void {
+  if (activeAndroidAuthCancel) {
+    activeAndroidAuthCancel();
+    activeAndroidAuthCancel = null;
+  }
+  isSigningIn = false;
 }
 
 async function signInViaAndroidChromeBridge(): Promise<{ user: User; accessToken: string }> {
@@ -253,6 +266,14 @@ async function signInViaAndroidChromeBridge(): Promise<{ user: User; accessToken
       if (timeoutTimer !== null) window.clearTimeout(timeoutTimer);
       document.removeEventListener('visibilitychange', onVisibility);
       delete (window as unknown as { __onAndroidAuthCallback?: unknown }).__onAndroidAuthCallback;
+      activeAndroidAuthCancel = null;
+    };
+
+    activeAndroidAuthCancel = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error('গুগল লগইন বাতিল করা হয়েছে। চাইলে নিচের Apps Script URL দিয়ে লগইন ছাড়াই শিটে সেভ করতে পারবেন।'));
     };
 
     const completeWithAuth = (
@@ -281,12 +302,9 @@ async function signInViaAndroidChromeBridge(): Promise<{ user: User; accessToken
     const tryConsume = async () => {
       if (settled || inFlight) return;
       inFlight = true;
+      const consumeUrl = `${handoffOrigin}/api/android-auth/consume?state=${encodeURIComponent(state)}`;
       try {
-        const res = await fetch(
-          `${handoffOrigin}/api/android-auth/consume?state=${encodeURIComponent(state)}`
-        );
-        if (!res.ok) return;
-        const data = (await res.json()) as {
+        let data: {
           ok?: boolean;
           pending?: boolean;
           accessToken?: string;
@@ -296,8 +314,21 @@ async function signInViaAndroidChromeBridge(): Promise<{ user: User; accessToken
             displayName?: string | null;
             photoURL?: string | null;
           };
-        };
-        if (data.ok && !data.pending && data.accessToken) {
+        } | null = null;
+
+        try {
+          const nativeRes = await callAndroidNativeHttp('GET', consumeUrl);
+          if (nativeRes.ok && nativeRes.text.trim().startsWith('{')) {
+            data = JSON.parse(nativeRes.text);
+          }
+        } catch {
+          const res = await fetch(consumeUrl);
+          if (res.ok) {
+            data = await res.json();
+          }
+        }
+
+        if (data?.ok && !data.pending && data.accessToken) {
           completeWithAuth(data.accessToken, data.user);
         }
       } catch {
@@ -351,10 +382,10 @@ async function signInViaAndroidChromeBridge(): Promise<{ user: User; accessToken
       cleanup();
       reject(
         new Error(
-          'ব্রাউজার থেকে গুগল লগইনের সময়সীমা শেষ হয়েছে। অনুগ্রহ করে আবার চেষ্টা করুন।'
+          'ব্রাউজার থেকে গুগল লগইনের সময়সীমা শেষ হয়েছে। নিচের «৪. মূল শিট Save/Push Apps Script URL» ব্যবহার করে লগইন ছাড়াই শিটে সেভ করতে পারবেন।'
         )
       );
-    }, 120_000);
+    }, 75_000);
   });
 }
 
@@ -426,3 +457,4 @@ export const googleLogout = async (): Promise<void> => {
   cachedAndroidUser = null;
   await auth.signOut();
 };
+

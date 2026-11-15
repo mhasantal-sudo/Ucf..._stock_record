@@ -212,13 +212,20 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             .filter((x) => x.category === meta.category)
             .reduce((s, x) => s + x.allocationQty, 0)
       );
+      const projQty = round3(
+        db.projects
+          .filter((x) => x.category === meta.category)
+          .reduce((s, x) => s + (x.allocationQty || 0), 0)
+      );
       const doQty = round3(
         db.doIssues
           .filter((x) => x.category === meta.category)
           .reduce((s, x) => s + x.allocationQty, 0)
       );
       const pendingQty = pendingByCategory.get(meta.category) ?? round3(Math.max(0, subQty - doQty));
-      const baseTotal = Math.max(subQty, doQty + pendingQty, minQty, 0);
+      const stageMax = Math.max(minQty, meta.requiresDC ? dcQty : 0, subQty, projQty);
+      const unissuedTotalQty = round3(Math.max(0, stageMax - doQty));
+      const baseTotal = Math.max(subQty, doQty + pendingQty, minQty, projQty, 0);
       const pct = baseTotal > 0 ? Math.min(100, Math.round((doQty / baseTotal) * 100)) : 0;
 
       return {
@@ -226,9 +233,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         visual: CAT_VISUAL_META[meta.category],
         minQty,
         dcQty,
+        projQty,
         subQty,
         doQty,
         pendingQty,
+        unissuedTotalQty,
         baseTotal,
         pct,
       };
@@ -669,59 +678,84 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {categoryRows.map(({ meta, visual, minQty, dcQty, subQty, doQty, pendingQty, pct }) => {
-                const Icon = visual.icon;
-                return (
-                  <tr
-                    key={meta.id}
-                    title={meta.category}
-                    onClick={() => onSelectCategory(meta.category)}
-                    className="hover:bg-rose-50/40 cursor-pointer transition-colors"
-                  >
-                    <td className="py-2 px-3">
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={`h-7 w-7 rounded-lg border flex items-center justify-center shrink-0 ${visual.bg}`}
-                        >
-                          <Icon className={`h-3.5 w-3.5 ${visual.fg}`} />
-                        </span>
-                        <div className="min-w-0">
-                          <div className="font-bold text-slate-900 leading-tight truncate">
-                            {visual.microLabel}
-                          </div>
-                          <div className="mt-0.5 h-1 w-14 rounded-full bg-slate-100 overflow-hidden">
-                            <div
-                              className="h-full rounded-full"
-                              style={{ width: `${pct}%`, backgroundColor: visual.barHex }}
-                            />
+              {categoryRows.map(
+                ({
+                  meta,
+                  visual,
+                  minQty,
+                  dcQty,
+                  projQty,
+                  subQty,
+                  doQty,
+                  pendingQty,
+                  unissuedTotalQty,
+                  pct,
+                }) => {
+                  const Icon = visual.icon;
+                  return (
+                    <tr
+                      key={meta.id}
+                      title={meta.category}
+                      onClick={() => onSelectCategory(meta.category)}
+                      className="hover:bg-rose-50/40 cursor-pointer transition-colors"
+                    >
+                      <td className="py-2 px-3">
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`h-7 w-7 rounded-lg border flex items-center justify-center shrink-0 ${visual.bg}`}
+                          >
+                            <Icon className={`h-3.5 w-3.5 ${visual.fg}`} />
+                          </span>
+                          <div className="min-w-0">
+                            <div className="font-bold text-slate-900 leading-tight truncate">
+                              {visual.microLabel}
+                            </div>
+                            <div className="mt-0.5 h-1 w-14 rounded-full bg-slate-100 overflow-hidden">
+                              <div
+                                className="h-full rounded-full"
+                                style={{ width: `${pct}%`, backgroundColor: visual.barHex }}
+                              />
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    </td>
-                    <td className="py-2 px-2 text-right font-semibold text-slate-700">
-                      {formatBnQty(minQty)}
-                    </td>
-                    <td className="py-2 px-2 text-right text-slate-500">
-                      {meta.requiresDC ? formatBnQty(dcQty) : '—'}
-                    </td>
-                    <td className="py-2 px-2 text-right font-semibold text-slate-800">
-                      {formatBnQty(subQty)}
-                    </td>
-                    <td className="py-2 px-2 text-right font-bold text-[#E2136E]">
-                      {formatBnQty(doQty)}
-                    </td>
-                    <td className="py-2 px-3 text-right font-bold">
-                      {pendingQty > 0.0005 ? (
-                        <span className="text-amber-700">{formatBnQty(pendingQty)}</span>
-                      ) : doQty > 0 ? (
-                        <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 inline-block" />
-                      ) : (
-                        <span className="text-slate-300">—</span>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
+                      </td>
+                      <td className="py-2 px-2 text-right font-semibold text-slate-700">
+                        {formatBnQty(minQty)}
+                      </td>
+                      <td className="py-2 px-2 text-right text-slate-500">
+                        <div>{meta.requiresDC ? formatBnQty(dcQty) : '—'}</div>
+                        {meta.supportsProjects && projQty > 0.0005 && (
+                          <div className="text-[10px] text-slate-400">
+                            প্রকল্প: {formatBnQty(projQty)}
+                          </div>
+                        )}
+                      </td>
+                      <td className="py-2 px-2 text-right font-semibold text-slate-800">
+                        {formatBnQty(subQty)}
+                      </td>
+                      <td className="py-2 px-2 text-right font-bold text-[#E2136E]">
+                        {formatBnQty(doQty)}
+                      </td>
+                      <td className="py-2 px-3 text-right font-bold">
+                        {pendingQty > 0.0005 ? (
+                          <span className="text-amber-700">{formatBnQty(pendingQty)}</span>
+                        ) : unissuedTotalQty > 0.0005 ? (
+                          <span
+                            className="text-amber-700"
+                            title="মন্ত্রণালয় / ডিসি / প্রকল্প পর্যায়ে বরাদ্দ আছে; উপবরাদ্দ ও ডিও বাকি"
+                          >
+                            {formatBnQty(unissuedTotalQty)}
+                          </span>
+                        ) : doQty > 0 ? (
+                          <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 inline-block" />
+                        ) : (
+                          <span className="text-slate-300">—</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                }
+              )}
             </tbody>
           </table>
         </div>
@@ -781,3 +815,4 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     </div>
   );
 };
+

@@ -27,15 +27,19 @@ import {
   type ReportTemplateId,
   type UNOSuballocation,
 } from '../types/allocation';
-import type { DriveSpreadsheetFile } from '../types/grain';
+import type { DriveSpreadsheetFile, SheetWriteConfirmRequest } from '../types/grain';
 import { createEmptyAllocationDatabase } from '../shared/allocSampleData';
 import {
+  ALLOC_SHEET_TABS,
   autoDetectAllocationSpreadsheets,
+  countAllocationDatabaseRecords,
+  fetchAllocationFromAppsScript,
   fetchAllocationFromOAuthSheet,
   fetchAllocationFromPublicSheet,
   fetchExternalChallansFromAppsScript,
   fetchExternalChallansFromSheet,
   reconcileChallansAndDOs,
+  writeAllocationDatabaseToAppsScript,
   writeAllocationDatabaseToOAuthSheet,
 } from '../shared/allocSheetsSync';
 import { getUnusedDoNumbers } from '../shared/allocReportEngine';
@@ -43,6 +47,8 @@ import { triggerBlobDownload } from '../shared/downloadUtils';
 import {
   bnToEnDigits,
   fiscalYearLabel,
+  isChallanOnOrBeforeDo,
+  isSamePartyName,
   memosLikelyMatch,
   namesFuzzyMatch,
   namesLikelyMatch,
@@ -51,9 +57,11 @@ import {
   round2,
   round3,
   toBnDigits,
+  toIsoDateStr,
   uid,
 } from '../shared/bnUtils';
 import {
+  cancelPendingAndroidSignIn,
   clearGoogleAccessToken,
   getGoogleAccessToken,
   googleLogout,
@@ -64,12 +72,42 @@ import { extractSpreadsheetId, GoogleAuthExpiredError } from '../shared/googleSh
 
 const STORAGE_DB_KEY = 'khaddo_boraddo_db_v1';
 const STORAGE_SHEETS_KEY = 'khaddo_boraddo_sheets_v1';
+const STORAGE_PENDING_PUSH_KEY = 'khaddo_boraddo_pending_push_v1';
 const LEGACY_GRAIN_SHEETS_KEY = 'khaddo_stock_gsheets_config_v1';
 const PORTRAIT_MIGRATION_KEY = 'khaddo_boraddo_portrait_migrated_v1';
 const PURGE_SAMPLE_MIGRATION_KEY = 'khaddo_boraddo_purge_sample_v1';
 const CLEAN_TITLES_MIGRATION_KEY = 'khaddo_boraddo_clean_titles_v1';
 const MONTHLY_NO_COPY_MIGRATION_KEY = 'khaddo_boraddo_monthly_no_copy_v1';
 const CHALLAN_SIGN_EQUAL_MIGRATION_KEY = 'khaddo_boraddo_challan_sign_equal_v1';
+
+function getWriteTargetKey(spreadsheetId: string, gasUrl: string): string {
+  const cleanId = extractSpreadsheetId(spreadsheetId);
+  const cleanGas = String(gasUrl || '').trim();
+  if (cleanId) return `sheet:${cleanId}`;
+  if (cleanGas) return `gas:${cleanGas}`;
+  return '';
+}
+
+function loadPendingPushFlag(): boolean {
+  try {
+    return typeof localStorage !== 'undefined' && localStorage.getItem(STORAGE_PENDING_PUSH_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function savePendingPushFlag(pending: boolean): void {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    if (pending) {
+      localStorage.setItem(STORAGE_PENDING_PUSH_KEY, '1');
+    } else {
+      localStorage.removeItem(STORAGE_PENDING_PUSH_KEY);
+    }
+  } catch {
+    // ignore
+  }
+}
 
 const SAMPLE_ID_PREFIXES = new Set([
   'min-1', 'min-2', 'min-3', 'min-4', 'min-5',
@@ -279,6 +317,15 @@ export interface ActionResult {
   error?: string;
 }
 
+export type SheetSyncUiState =
+  | 'unlinked'
+  | 'syncing'
+  | 'synced'
+  | 'pending_push'
+  | 'needs_auth'
+  | 'needs_write_confirm'
+  | 'error';
+
 export function useAllocationStore() {
   const [db, setDb] = useState<AllocationDatabase>(loadInitialDatabase);
   const [sheetsConfig, setSheetsConfig] = useState<AllocationSheetsConfig>(loadInitialSheetsConfig);
@@ -290,14 +337,33 @@ export function useAllocationStore() {
   const [googleAuthError, setGoogleAuthError] = useState<string | null>(null);
   const [isSyncingSheets, setIsSyncingSheets] = useState(false);
   const [driveFiles, setDriveFiles] = useState<DriveSpreadsheetFile[]>([]);
+  const [hasPendingSheetSync, setHasPendingSheetSync] = useState<boolean>(loadPendingPushFlag);
+  const [writeConfirmState, setWriteConfirmState] = useState<{
+    request: SheetWriteConfirmRequest;
+    targetKey: string;
+    overrideGasUrl?: string;
+    overrideSheetId?: string;
+    resolveResult?: (res: ActionResult) => void;
+  } | null>(null);
 
   const dbRef = useRef(db);
   const sheetsConfigRef = useRef(sheetsConfig);
   const tokenRef = useRef(googleAccessToken);
   const initialAutoSyncDoneRef = useRef(false);
+  const lastSyncedDbJsonRef = useRef<string>(
+    loadPendingPushFlag() ? '' : JSON.stringify(db)
+  );
+  const autoPushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isPushingRef = useRef(false);
+  const pendingAutoPushRef = useRef(false);
+  const touchedMainChallansRef = useRef(false);
+  const hadNonEmptyDbRef = useRef(countAllocationDatabaseRecords(db) > 0);
 
   useEffect(() => {
     dbRef.current = db;
+    if (countAllocationDatabaseRecords(db) > 0) {
+      hadNonEmptyDbRef.current = true;
+    }
   }, [db]);
 
   useEffect(() => {
@@ -346,7 +412,11 @@ export function useAllocationStore() {
       .then((seed) => {
         if (!seed || typeof seed !== 'object') return;
         if (seed.db && typeof seed.db === 'object') {
-          setDb((prev) => ({ ...prev, ...seed.db }));
+          setDb((prev) => {
+            const merged = { ...prev, ...seed.db };
+            lastSyncedDbJsonRef.current = JSON.stringify(merged);
+            return merged;
+          });
         }
         if (seed.sheetsConfig && typeof seed.sheetsConfig === 'object') {
           setSheetsConfig((prev) => ({ ...prev, ...seed.sheetsConfig }));
@@ -869,19 +939,45 @@ export function useAllocationStore() {
       if (!existing) return { ok: false, error: 'প্রকল্প খুঁজে পাওয়া যায়নি।' };
       const nextQty = round3(patch.allocationQty ?? existing.allocationQty);
       if (nextQty <= 0) return { ok: false, error: 'প্রকল্পের পরিমাণ ০-এর বেশি হতে হবে।' };
+      const nextNo = (patch.projectNo ?? existing.projectNo).trim() || existing.projectNo;
+      const nextName = (patch.projectName ?? existing.projectName).trim();
+      const nextPres = (patch.presidentName ?? existing.presidentName).trim();
+      const nextUnion = (patch.unionName ?? existing.unionName).trim() || existing.unionName;
+      const matchesOldProj = (cat: AllocationCategory, dcMemo: string, projNo?: string) =>
+        cat === existing.category &&
+        memosLikelyMatch(dcMemo, existing.dcMemo) &&
+        normMemoNo(projNo || '') === normMemoNo(existing.projectNo);
+
       setDb((prev) => ({
         ...prev,
         projects: prev.projects.map((p) =>
           p.id === id
             ? {
                 ...p,
-                projectNo: (patch.projectNo ?? p.projectNo).trim() || p.projectNo,
-                projectName: (patch.projectName ?? p.projectName).trim(),
-                presidentName: (patch.presidentName ?? p.presidentName).trim(),
-                unionName: (patch.unionName ?? p.unionName).trim() || p.unionName,
+                projectNo: nextNo,
+                projectName: nextName,
+                presidentName: nextPres,
+                unionName: nextUnion,
                 allocationQty: nextQty,
               }
             : p
+        ),
+        unoSuballocations: prev.unoSuballocations.map((u) =>
+          matchesOldProj(u.category, u.dcMemo, u.projectNo)
+            ? {
+                ...u,
+                projectNo: nextNo,
+                projectName: nextName || u.projectName,
+              }
+            : u
+        ),
+        doIssues: prev.doIssues.map((d) =>
+          matchesOldProj(d.category, d.dcMemo, d.projectNo)
+            ? {
+                ...d,
+                projectNo: nextNo,
+              }
+            : d
         ),
       }));
       return { ok: true, message: 'প্রকল্পের তথ্য হালনাগাদ হয়েছে।' };
@@ -1219,6 +1315,40 @@ export function useAllocationStore() {
     [db.doBooks]
   );
 
+  const updateDOBook = useCallback(
+    (
+      id: string,
+      input: { bookNo: number; startPage: number; endPage: number }
+    ): ActionResult => {
+      const existing = db.doBooks.find((b) => b.id === id);
+      if (!existing) return { ok: false, error: 'ডিও বই খুঁজে পাওয়া যায়নি।' };
+      const bookNo = Math.round(input.bookNo);
+      const startPage = Math.round(input.startPage);
+      const endPage = Math.round(input.endPage);
+      if (bookNo <= 0 || startPage <= 0 || endPage < startPage) {
+        return { ok: false, error: 'সঠিক বই নং, শুরু পাতা ও শেষ পাতা দিন (শেষ পাতা >= শুরু পাতা)।' };
+      }
+      const overlap = db.doBooks.find(
+        (b) => b.id !== id && startPage <= b.endPage && endPage >= b.startPage
+      );
+      if (overlap) {
+        return {
+          ok: false,
+          error: `বই নং ${toBnDigits(overlap.bookNo)}-এর পাতার (${toBnDigits(overlap.startPage)}-${toBnDigits(overlap.endPage)}) সাথে মিল আছে!`,
+        };
+      }
+      const totalCount = endPage - startPage + 1;
+      setDb((prev) => ({
+        ...prev,
+        doBooks: prev.doBooks.map((b) =>
+          b.id === id ? { ...b, bookNo, startPage, endPage, totalCount } : b
+        ),
+      }));
+      return { ok: true, message: `বই নং ${toBnDigits(bookNo)} (${toBnDigits(totalCount)}টি ডিও) হালনাগাদ হয়েছে।` };
+    },
+    [db.doBooks]
+  );
+
   const deleteDOBook = useCallback((id: string) => {
     setDb((prev) => ({ ...prev, doBooks: prev.doBooks.filter((b) => b.id !== id) }));
   }, []);
@@ -1228,21 +1358,100 @@ export function useAllocationStore() {
       if (!input.challanNo.trim() || !input.dealerName.trim()) {
         return { ok: false, error: 'চালান নং ও ডিলারের নাম দিন।' };
       }
+      const normNo = normMemoNo(input.challanNo);
+      if (!normNo) {
+        return { ok: false, error: 'সঠিক চালান নম্বর দিন।' };
+      }
+
+      // একবার ব্যবহৃত চালান পুনরায় এন্ট্রি নেওয়া যাবে না (একই ধরন ও নম্বরের চালান ডুপ্লিকেট বা ইতিমধ্যে ব্যবহৃত হলে বাতিল)
+      const dupChallan = db.challans.find(
+        (c) =>
+          c.id !== existingId &&
+          c.challanType === input.challanType &&
+          normMemoNo(c.challanNo) === normNo
+      );
+      if (dupChallan) {
+        return {
+          ok: false,
+          error: `${input.challanType} নং ${toBnDigits(input.challanNo.trim())} ইতিমধ্যে ব্যবহৃত হয়েছে (${dupChallan.dealerName})! একবার ব্যবহৃত চালান আর ব্যবহার করা যাবে না।`,
+        };
+      }
+
+      const existingRec = existingId ? db.challans.find((c) => c.id === existingId) : undefined;
+      const usedInDo = db.doIssues.find((d) => {
+        const matchMain =
+          input.challanType === 'মূল চালান' && d.challanNo && normMemoNo(d.challanNo) === normNo;
+        const matchTax =
+          input.challanType === 'আয়কর চালান' && d.taxChallanNo && normMemoNo(d.taxChallanNo) === normNo;
+        if (!matchMain && !matchTax) return false;
+        if (
+          existingRec &&
+          existingRec.doNo &&
+          normMemoNo(d.doNo) === normMemoNo(existingRec.doNo) &&
+          normMemoNo(existingRec.challanNo) === normNo
+        ) {
+          return false;
+        }
+        return true;
+      });
+      if (usedInDo) {
+        return {
+          ok: false,
+          error: `${input.challanType} নং ${toBnDigits(input.challanNo.trim())} ইতিমধ্যে ডিও নং ${toBnDigits(usedInDo.doNo)} (${usedInDo.recipientName})-এ ব্যবহৃত হয়েছে! একবার ব্যবহৃত চালান আর ব্যবহার করা যাবে না।`,
+        };
+      }
+
+      const targetDoNo = (input.doNo || '').trim();
+      if (targetDoNo) {
+        const targetDo = db.doIssues.find((d) => normMemoNo(d.doNo) === normMemoNo(targetDoNo));
+        if (targetDo) {
+          if (targetDo.category !== input.category) {
+            return {
+              ok: false,
+              error: `এক খাতের চালান (${input.category}) অন্য খাতের ডিও নং ${toBnDigits(targetDo.doNo)} (${targetDo.category})-এ যুক্ত করা যাবে না!`,
+            };
+          }
+          if (!isSamePartyName(targetDo.recipientName, input.dealerName)) {
+            return {
+              ok: false,
+              error: `এক ডিলার/ব্যক্তির চালান (${input.dealerName}) অন্য ডিলার/ব্যক্তির ডিও নং ${toBnDigits(targetDo.doNo)} (${targetDo.recipientName})-এ যুক্ত করা যাবে না!`,
+            };
+          }
+          if (!isChallanOnOrBeforeDo(input.challanDate, targetDo.issueDate, true)) {
+            return {
+              ok: false,
+              error: `চালানের তারিখ অবশ্যই ডিও ইস্যুর একই তারিখ বা তার আগের তারিখ হতে হবে (ডিও তারিখ: ${targetDo.issueDate})!`,
+            };
+          }
+          const alreadyAssigned =
+            input.challanType === 'মূল চালান' ? targetDo.challanNo : targetDo.taxChallanNo;
+          if (alreadyAssigned && normMemoNo(alreadyAssigned) !== normNo) {
+            return {
+              ok: false,
+              error: `ডিও নং ${toBnDigits(targetDo.doNo)}-এ ইতিমধ্যে ${input.challanType} নং ${toBnDigits(alreadyAssigned)} যুক্ত আছে!`,
+            };
+          }
+        }
+      }
+
+      touchedMainChallansRef.current = true;
       if (existingId) {
-        setDb((prev) => ({
-          ...prev,
-          challans: prev.challans.map((c) =>
-            c.id === existingId
-              ? {
-                  ...c,
-                  ...input,
-                  challanNo: input.challanNo.trim(),
-                  recordedAmount: round2(input.recordedAmount),
-                  depositedAmount: round2(input.depositedAmount),
-                }
-              : c
-          ),
-        }));
+        setDb((prev) =>
+          reconcileChallansAndDOs({
+            ...prev,
+            challans: prev.challans.map((c) =>
+              c.id === existingId
+                ? {
+                    ...c,
+                    ...input,
+                    challanNo: input.challanNo.trim(),
+                    recordedAmount: round2(input.recordedAmount),
+                    depositedAmount: round2(input.depositedAmount),
+                  }
+                : c
+            ),
+          })
+        );
         return { ok: true, message: 'চালান তথ্য আপডেট হয়েছে।' };
       }
       const row: ChallanRecord = {
@@ -1253,14 +1462,52 @@ export function useAllocationStore() {
         id: uid('chln'),
         createdAt: new Date().toISOString(),
       };
-      setDb((prev) => ({ ...prev, challans: [row, ...prev.challans] }));
+      setDb((prev) =>
+        reconcileChallansAndDOs({
+          ...prev,
+          challans: [row, ...prev.challans],
+        })
+      );
       return { ok: true, message: 'নতুন চালান সংরক্ষিত হয়েছে।' };
     },
-    []
+    [db.challans, db.doIssues]
   );
 
   const deleteChallan = useCallback((id: string) => {
-    setDb((prev) => ({ ...prev, challans: prev.challans.filter((c) => c.id !== id) }));
+    touchedMainChallansRef.current = true;
+    setDb((prev) => {
+      const target = prev.challans.find((c) => c.id === id);
+      const targetNorm = target ? normMemoNo(target.challanNo) : '';
+      const cleanedDos = target
+        ? prev.doIssues.map((d) => {
+            if (
+              target.challanType === 'মূল চালান' &&
+              d.challanNo &&
+              normMemoNo(d.challanNo) === targetNorm
+            ) {
+              return { ...d, challanNo: undefined, challanDate: undefined, challanAmount: undefined };
+            }
+            if (
+              target.challanType === 'আয়কর চালান' &&
+              d.taxChallanNo &&
+              normMemoNo(d.taxChallanNo) === targetNorm
+            ) {
+              return {
+                ...d,
+                taxChallanNo: undefined,
+                taxChallanDate: undefined,
+                taxChallanAmount: undefined,
+              };
+            }
+            return d;
+          })
+        : prev.doIssues;
+      return reconcileChallansAndDOs({
+        ...prev,
+        challans: prev.challans.filter((c) => c.id !== id),
+        doIssues: cleanedDos,
+      });
+    });
   }, []);
 
   const verifyChallanForRecipient = useCallback(
@@ -1268,7 +1515,14 @@ export function useAllocationStore() {
       category: AllocationCategory,
       dealerName: string,
       allocationQty: number,
-      opts?: { subId?: string; unoDate?: string; unoMemo?: string }
+      opts?: {
+        subId?: string;
+        unoDate?: string;
+        unoMemo?: string;
+        issueDate?: string;
+        excludeDoId?: string;
+        excludeChallanIds?: Set<string>;
+      }
     ) => {
       if (!CHALLAN_CATEGORIES.includes(category)) {
         return { applicable: false, ok: true, message: 'চালান প্রযোজ্য নয় (বিনামূল্য খাত)' };
@@ -1279,87 +1533,109 @@ export function useAllocationStore() {
       const reqMain = round2(allocationQty * effUnitPrice);
       const reqTax = round2(allocationQty * effTaxRate);
 
-      const dayDiff = (a?: string, b?: string): number => {
-        const tA = a ? Date.parse(bnToEnDigits(a).trim()) : NaN;
-        const tB = b ? Date.parse(bnToEnDigits(b).trim()) : NaN;
-        if (Number.isNaN(tA) || Number.isNaN(tB)) return 9999;
-        return Math.abs(tA - tB) / 86400000;
+      // ইতিমধ্যে অন্য ডিও-তে ব্যবহৃত সব চালান নং ও চালান আইডি চিহ্নিত করি যাতে একবার ব্যবহৃত চালান আর ব্যবহার করা না যায়
+      const usedMainNos = new Set<string>();
+      const usedTaxNos = new Set<string>();
+      const usedDoNos = new Set<string>();
+      for (const d of db.doIssues) {
+        if (opts?.excludeDoId && d.id === opts.excludeDoId) continue;
+        if (d.doNo) usedDoNos.add(normMemoNo(d.doNo));
+        if (d.challanNo) usedMainNos.add(normMemoNo(d.challanNo));
+        if (d.taxChallanNo) usedTaxNos.add(normMemoNo(d.taxChallanNo));
+      }
+
+      const isChallanAlreadyUsed = (c: ChallanRecord): boolean => {
+        if (opts?.excludeChallanIds?.has(c.id)) return true;
+        const cNo = normMemoNo(c.challanNo);
+        if (c.challanType === 'মূল চালান' && cNo && usedMainNos.has(cNo)) return true;
+        if (c.challanType === 'আয়কর চালান' && cNo && usedTaxNos.has(cNo)) return true;
+        if (c.doNo && usedDoNos.has(normMemoNo(c.doNo))) return true;
+        return false;
       };
 
-      const pickChallan = (type: ChallanRecord['challanType']): ChallanRecord | undefined => {
-        if (opts?.subId) {
-          const targetId = normMemoNo(opts.subId);
-          const direct = db.challans.find(
-            (c) =>
-              c.challanType === type &&
-              c.dealerAllocationId &&
-              normMemoNo(c.dealerAllocationId) === targetId
-          );
-          if (direct) return direct;
-        }
+      const targetDoDate = (opts?.issueDate || '').trim();
+      const challanNumSortVal = (no: string): number => {
+        const digits = bnToEnDigits(no || '').replace(/\D/g, '');
+        return digits ? Number(digits) : Number.MAX_SAFE_INTEGER;
+      };
 
-        const catMatches = db.challans.filter(
+      const pickChallan = (
+        type: ChallanRecord['challanType']
+      ): { chosen?: ChallanRecord; hadUsedOnly: boolean; hadPostDatedOnly: boolean } => {
+        // Strict: same category AND same dealer/institution/person ONLY (never cross-category or cross-dealer)
+        const samePartyAndCat = db.challans.filter(
           (c) =>
             c.challanType === type &&
-            (!c.category || c.category === category) &&
-            (namesLikelyMatch(c.dealerName, dealerName) || namesFuzzyMatch(c.dealerName, dealerName))
+            c.category === category &&
+            isSamePartyName(c.dealerName, dealerName)
         );
-        const pool =
-          catMatches.length > 0
-            ? catMatches
-            : db.challans.filter(
-                (c) =>
-                  c.challanType === type &&
-                  (namesLikelyMatch(c.dealerName, dealerName) || namesFuzzyMatch(c.dealerName, dealerName))
-              );
+        if (samePartyAndCat.length === 0) {
+          return { chosen: undefined, hadUsedOnly: false, hadPostDatedOnly: false };
+        }
 
-        const scopedPool = opts?.subId
-          ? pool.filter(
-              (c) =>
-                !c.dealerAllocationId ||
-                normMemoNo(c.dealerAllocationId) === normMemoNo(opts.subId!)
-            )
-          : pool;
+        const unused = samePartyAndCat.filter((c) => !isChallanAlreadyUsed(c));
+        if (unused.length === 0) {
+          return { chosen: undefined, hadUsedOnly: true, hadPostDatedOnly: false };
+        }
 
-        const within35 = opts?.unoDate
-          ? scopedPool.filter((c) => {
-              const cDate = c.challanDate || c.doDate;
-              if (!cDate) return false;
-              return dayDiff(cDate, opts.unoDate) <= 35;
-            })
-          : scopedPool;
-        const dateFiltered =
-          within35.length > 0
-            ? within35
-            : opts?.unoDate
-              ? scopedPool.filter((c) => {
-                  const cDate = c.challanDate || c.doDate;
-                  if (!cDate) return false;
-                  return dayDiff(cDate, opts.unoDate) <= 60;
-                })
-              : scopedPool;
+        // Strict date rule: challan date must be <= DO issue date (when DO issue date is known)
+        const dateEligible = targetDoDate
+          ? unused.filter((c) => isChallanOnOrBeforeDo(c.challanDate, targetDoDate, true))
+          : unused.filter((c) => Boolean(toIsoDateStr(c.challanDate)));
 
-        if (dateFiltered.length === 0) return undefined;
-        return [...dateFiltered].sort((a, b) => {
-          const dDiffA = opts?.unoDate ? dayDiff(a.challanDate || a.doDate, opts.unoDate) : 0;
-          const dDiffB = opts?.unoDate ? dayDiff(b.challanDate || b.doDate, opts.unoDate) : 0;
+        if (dateEligible.length === 0) {
+          return { chosen: undefined, hadUsedOnly: false, hadPostDatedOnly: true };
+        }
+
+        // Earliest challan maps to earliest DO for the same dealer & category
+        const sorted = [...dateEligible].sort((a, b) => {
+          const isoA = toIsoDateStr(a.challanDate) || '9999-12-31';
+          const isoB = toIsoDateStr(b.challanDate) || '9999-12-31';
+          if (isoA !== isoB) return isoA.localeCompare(isoB);
+
+          // Same date tie-breaker: direct subId link -> qty proximity -> challan number ASC
+          if (opts?.subId) {
+            const subA = a.dealerAllocationId && normMemoNo(a.dealerAllocationId) === normMemoNo(opts.subId) ? 0 : 1;
+            const subB = b.dealerAllocationId && normMemoNo(b.dealerAllocationId) === normMemoNo(opts.subId) ? 0 : 1;
+            if (subA !== subB) return subA - subB;
+          }
           const qDiffA = a.allocationQty ? Math.abs(a.allocationQty - allocationQty) : 999;
           const qDiffB = b.allocationQty ? Math.abs(b.allocationQty - allocationQty) : 999;
-          return qDiffA * 100 + dDiffA - (qDiffB * 100 + dDiffB);
-        })[0];
+          if (Math.abs(qDiffA - qDiffB) > 0.001) return qDiffA - qDiffB;
+          return challanNumSortVal(a.challanNo) - challanNumSortVal(b.challanNo);
+        });
+
+        return { chosen: sorted[0], hadUsedOnly: false, hadPostDatedOnly: false };
       };
 
-      const mainC = pickChallan('মূল চালান');
-      const taxC = pickChallan('আয়কর চালান');
+      const mainRes = pickChallan('মূল চালান');
+      const taxRes = pickChallan('আয়কর চালান');
+      const mainC = mainRes.chosen;
+      const taxC = taxRes.chosen;
 
       const errs: string[] = [];
-      if (!mainC && reqMain > 0) errs.push('মূল চালান পাওয়া যায়নি');
-      else if (mainC && mainC.depositedAmount + 0.01 < reqMain) {
+      if (!mainC && reqMain > 0) {
+        if (mainRes.hadUsedOnly) {
+          errs.push('এই ডিলারের মূল চালান ইতিমধ্যে অন্য ডিও-তে ব্যবহৃত হয়েছে');
+        } else if (mainRes.hadPostDatedOnly) {
+          errs.push('মূল চালানের তারিখ ডিও ইস্যুর তারিখের পরে হওয়ায় সংযুক্ত করা যায়নি');
+        } else {
+          errs.push('একই খাত ও ডিলারের মূল চালান পাওয়া যায়নি');
+        }
+      } else if (mainC && mainC.depositedAmount + 0.01 < reqMain) {
         errs.push(`মূল চালানে কম জমা (${toBnDigits(round2(reqMain - mainC.depositedAmount))} ৳)`);
       }
+
       if (reqTax > 0) {
-        if (!taxC) errs.push('আয়কর চালান পাওয়া যায়নি');
-        else if (taxC.depositedAmount + 0.01 < reqTax) {
+        if (!taxC) {
+          if (taxRes.hadUsedOnly) {
+            errs.push('এই ডিলারের আয়কর চালান ইতিমধ্যে অন্য ডিও-তে ব্যবহৃত হয়েছে');
+          } else if (taxRes.hadPostDatedOnly) {
+            errs.push('আয়কর চালানের তারিখ ডিও ইস্যুর তারিখের পরে হওয়ায় সংযুক্ত করা যায়নি');
+          } else {
+            errs.push('একই খাত ও ডিলারের আয়কর চালান পাওয়া যায়নি');
+          }
+        } else if (taxC.depositedAmount + 0.01 < reqTax) {
           errs.push(`আয়কর চালানে কম জমা (${toBnDigits(round2(reqTax - taxC.depositedAmount))} ৳)`);
         }
       }
@@ -1374,7 +1650,7 @@ export function useAllocationStore() {
         errors: errs,
       };
     },
-    [db.challans, db.rates]
+    [db.challans, db.doIssues, db.rates]
   );
 
   const issueDOBatch = useCallback(
@@ -1412,13 +1688,31 @@ export function useAllocationStore() {
         batchSet.add(dNo);
       }
 
+      // একাধিক ডিও ইস্যুর ক্ষেত্রে একই ডিলারের সবচেয়ে আগের ডিও-তে সবচেয়ে আগের চালান ১-থেকে-১ বরাদ্দ হবে
+      const doNumVal = (no: string): number => {
+        const digits = bnToEnDigits(no || '').replace(/\D/g, '');
+        return digits ? Number(digits) : Number.MAX_SAFE_INTEGER;
+      };
+      const sortedItems = [...items].sort((a, b) => {
+        const isoA = toIsoDateStr(a.issueDate) || '9999-12-31';
+        const isoB = toIsoDateStr(b.issueDate) || '9999-12-31';
+        if (isoA !== isoB) return isoA.localeCompare(isoB);
+        return doNumVal(a.doNo) - doNumVal(b.doNo);
+      });
+
+      const batchUsedChallanIds = new Set<string>();
       const now = new Date().toISOString();
-      const created: DOIssue[] = items.map((it) => {
+      const created: DOIssue[] = sortedItems.map((it) => {
         const check = verifyChallanForRecipient(it.category, it.recipientName, it.allocationQty, {
           subId: it.subId,
           unoDate: it.unoDate,
           unoMemo: it.unoMemo,
+          issueDate: it.issueDate,
+          excludeChallanIds: batchUsedChallanIds,
         });
+        if (check.mainChallan) batchUsedChallanIds.add(check.mainChallan.id);
+        if (check.taxChallan) batchUsedChallanIds.add(check.taxChallan.id);
+
         return {
           id: uid('do'),
           doNo: it.doNo.trim(),
@@ -1445,10 +1739,12 @@ export function useAllocationStore() {
         };
       });
 
-      setDb((prev) => ({
-        ...prev,
-        doIssues: [...created, ...prev.doIssues],
-      }));
+      setDb((prev) =>
+        reconcileChallansAndDOs({
+          ...prev,
+          doIssues: [...created, ...prev.doIssues],
+        })
+      );
       return {
         ok: true,
         message: `${toBnDigits(created.length)} টি ডিও সফলভাবে ইস্যু হয়েছে।`,
@@ -1479,26 +1775,40 @@ export function useAllocationStore() {
       ) {
         return { ok: false, error: `ডিও নং ${toBnDigits(nextDoNo)} আগেই ইস্যু করা হয়েছে!` };
       }
-      setDb((prev) => ({
-        ...prev,
-        doIssues: prev.doIssues.map((d) =>
-          d.id === id
-            ? {
-                ...d,
-                doNo: nextDoNo,
-                issueDate: nextDate,
-                allocationQty: nextQty,
-              }
-            : d
-        ),
-      }));
+      setDb((prev) =>
+        reconcileChallansAndDOs({
+          ...prev,
+          doIssues: prev.doIssues.map((d) => {
+            if (d.id !== id) return d;
+            const mainDateOk = isChallanOnOrBeforeDo(d.challanDate, nextDate, false);
+            const taxDateOk = isChallanOnOrBeforeDo(d.taxChallanDate, nextDate, false);
+            return {
+              ...d,
+              doNo: nextDoNo,
+              issueDate: nextDate,
+              allocationQty: nextQty,
+              challanNo: mainDateOk ? d.challanNo : undefined,
+              challanDate: mainDateOk ? d.challanDate : undefined,
+              challanAmount: mainDateOk ? d.challanAmount : undefined,
+              taxChallanNo: taxDateOk ? d.taxChallanNo : undefined,
+              taxChallanDate: taxDateOk ? d.taxChallanDate : undefined,
+              taxChallanAmount: taxDateOk ? d.taxChallanAmount : undefined,
+            };
+          }),
+        })
+      );
       return { ok: true, message: 'ডিও তথ্য হালনাগাদ হয়েছে।' };
     },
     [db.doIssues]
   );
 
   const deleteDOIssue = useCallback((id: string) => {
-    setDb((prev) => ({ ...prev, doIssues: prev.doIssues.filter((d) => d.id !== id) }));
+    setDb((prev) =>
+      reconcileChallansAndDOs({
+        ...prev,
+        doIssues: prev.doIssues.filter((d) => d.id !== id),
+      })
+    );
   }, []);
 
   const saveFoodDealer = useCallback((dealer: Omit<FoodDealer, 'id'>, existingId?: string) => {
@@ -1607,13 +1917,21 @@ export function useAllocationStore() {
 
   const updateReportTemplate = useCallback(
     (id: ReportTemplateId, patch: Partial<ReportTemplateConfig>) => {
-      setDb((prev) => ({
-        ...prev,
-        templates: {
-          ...prev.templates,
-          [id]: { ...prev.templates[id], ...patch },
-        },
-      }));
+      setDb((prev) => {
+        const catalogItem = REPORT_TEMPLATE_CATALOG.find((x) => x.id === id);
+        const baseTemplate =
+          prev.templates[id] ||
+          (catalogItem
+            ? createDefaultTemplate(catalogItem, prev.officer)
+            : prev.templates['monthly-dist']);
+        return {
+          ...prev,
+          templates: {
+            ...prev.templates,
+            [id]: { ...baseTemplate, ...patch },
+          },
+        };
+      });
     },
     []
   );
@@ -1644,7 +1962,8 @@ export function useAllocationStore() {
       rawIdOrUrl?: string,
       rawChallanIdOrUrl?: string,
       rawChallanGasUrl?: string,
-      tokenOverride?: string | null
+      tokenOverride?: string | null,
+      rawMainGasUrl?: string
     ): Promise<ActionResult> => {
       const cfg = sheetsConfigRef.current;
       const curDb = dbRef.current;
@@ -1653,9 +1972,10 @@ export function useAllocationStore() {
         rawChallanIdOrUrl ?? cfg.challanSpreadsheetId ?? ''
       );
       const challanGasUrl = String(rawChallanGasUrl ?? cfg.challanAppsScriptUrl ?? '').trim();
+      const mainGasUrl = String(rawMainGasUrl ?? cfg.appsScriptUrl ?? '').trim();
 
-      if (!targetId && !challanTargetId && !challanGasUrl) {
-        return { ok: false, error: 'সেটিংসে Google Sheet ID বা লিংক যুক্ত করুন।' };
+      if (!targetId && !challanTargetId && !challanGasUrl && !mainGasUrl) {
+        return { ok: false, error: 'সেটিংসে Google Sheet ID বা Apps Script লিংক যুক্ত করুন।' };
       }
 
       setIsSyncingSheets(true);
@@ -1665,14 +1985,37 @@ export function useAllocationStore() {
         let nextDb = curDb;
         let mainTitle = cfg.spreadsheetName;
         let tabsCount = 0;
+        let resolvedSheetId = targetId;
 
-        if (targetId) {
-          const res = token
-            ? await fetchAllocationFromOAuthSheet(token, targetId, curDb)
-            : await fetchAllocationFromPublicSheet(targetId, curDb);
+        if (targetId || mainGasUrl) {
+          let res: {
+            db: AllocationDatabase;
+            title: string;
+            tabsFound: string[];
+            matchedTabNames: string[];
+            spreadsheetId?: string;
+          };
+          if (token && targetId) {
+            res = await fetchAllocationFromOAuthSheet(token, targetId, curDb);
+          } else if (targetId) {
+            try {
+              res = await fetchAllocationFromPublicSheet(targetId, curDb);
+            } catch (pubErr) {
+              if (mainGasUrl) {
+                res = await fetchAllocationFromAppsScript(mainGasUrl, targetId, curDb);
+              } else {
+                throw pubErr;
+              }
+            }
+          } else {
+            res = await fetchAllocationFromAppsScript(mainGasUrl, '', curDb);
+          }
           nextDb = res.db;
           mainTitle = res.title;
           tabsCount = res.matchedTabNames.length || res.tabsFound.length;
+          if (!resolvedSheetId && res.spreadsheetId) {
+            resolvedSheetId = extractSpreadsheetId(res.spreadsheetId);
+          }
         }
 
         let challanTitle = cfg.challanSpreadsheetName || '';
@@ -1695,34 +2038,54 @@ export function useAllocationStore() {
         }
 
         nextDb = reconcileChallansAndDOs(nextDb);
+        if (countAllocationDatabaseRecords(nextDb) > 0) {
+          hadNonEmptyDbRef.current = true;
+        }
+        lastSyncedDbJsonRef.current = JSON.stringify(nextDb);
+        touchedMainChallansRef.current = false;
+        savePendingPushFlag(false);
+        setHasPendingSheetSync(false);
         setDb(nextDb);
 
         const summaryDetails = `মন্ত্রণালয় ${toBnDigits(nextDb.ministryAllocations.length)}, উপবরাদ্দ ${toBnDigits(
           nextDb.dealerSuballocations.length + nextDb.unoSuballocations.length
         )}, ডিও ${toBnDigits(nextDb.doIssues.length)}, চালান ${toBnDigits(nextDb.challans.length)}`;
 
-        const syncMsg = targetId
+        const hasMainSource = Boolean(resolvedSheetId || mainGasUrl);
+        const syncMsg = hasMainSource
           ? `${mainTitle} (${toBnDigits(tabsCount)}টি ট্যাব · ${summaryDetails}${
               challanTitle ? ` · চালান উৎস: ${challanTitle}` : ''
             })`
           : `${challanTitle || 'চালান শিট'} থেকে ${toBnDigits(challanSyncedCount)}টি চালান সিঙ্ক হয়েছে`;
 
-        setSheetsConfig((prev) => ({
-          ...prev,
-          enabled: true,
-          spreadsheetId: targetId || prev.spreadsheetId,
-          spreadsheetName: mainTitle || prev.spreadsheetName,
-          challanSpreadsheetId: challanTargetId || prev.challanSpreadsheetId,
-          challanSpreadsheetName: challanTitle || prev.challanSpreadsheetName,
-          challanAppsScriptUrl: challanGasUrl || prev.challanAppsScriptUrl,
-          lastSyncAt: new Date().toISOString(),
-          lastSyncStatus: 'ok',
-          lastSyncMessage: syncMsg,
-        }));
+        setSheetsConfig((prev) => {
+          const effectiveGas = mainGasUrl || String(prev.appsScriptUrl || '').trim();
+          const confirmed = prev.writeConfirmedSheetIds || [];
+          const syncedKey =
+            (resolvedSheetId || effectiveGas) && tabsCount > 0
+              ? getWriteTargetKey(resolvedSheetId, effectiveGas)
+              : '';
+          const nextConfirmed =
+            syncedKey && !confirmed.includes(syncedKey) ? [...confirmed, syncedKey] : confirmed;
+          return {
+            ...prev,
+            enabled: true,
+            spreadsheetId: resolvedSheetId || prev.spreadsheetId,
+            spreadsheetName: mainTitle || prev.spreadsheetName,
+            appsScriptUrl: effectiveGas || prev.appsScriptUrl,
+            writeConfirmedSheetIds: nextConfirmed,
+            challanSpreadsheetId: challanTargetId || prev.challanSpreadsheetId,
+            challanSpreadsheetName: challanTitle || prev.challanSpreadsheetName,
+            challanAppsScriptUrl: challanGasUrl || prev.challanAppsScriptUrl,
+            lastSyncAt: new Date().toISOString(),
+            lastSyncStatus: 'ok',
+            lastSyncMessage: syncMsg,
+          };
+        });
 
         return {
           ok: true,
-          message: targetId
+          message: hasMainSource
             ? `"${mainTitle}" থেকে সফলভাবে সিঙ্ক হয়েছে (${summaryDetails})।`
             : `${challanTitle || 'চালান শিট'} থেকে ${toBnDigits(challanSyncedCount)}টি চালান সিঙ্ক হয়েছে!`,
         };
@@ -1745,6 +2108,259 @@ export function useAllocationStore() {
     },
     []
   );
+
+  const pushToGoogleSheet = useCallback(
+    async (
+      overrideGasUrl?: string,
+      overrideSheetId?: string,
+      tokenOverride?: string | null
+    ): Promise<ActionResult> => {
+      const cfg = sheetsConfigRef.current;
+      const targetId = extractSpreadsheetId(overrideSheetId ?? cfg.spreadsheetId);
+      const gasUrl = String(overrideGasUrl ?? cfg.appsScriptUrl ?? '').trim();
+      const token = tokenOverride ?? tokenRef.current ?? getGoogleAccessToken();
+
+      if (!targetId && !gasUrl) {
+        return {
+          ok: false,
+          error: 'প্রথমে মূল Google Sheet ID অথবা Apps Script Web App URL যুক্ত করুন।',
+        };
+      }
+      if (!token && !gasUrl) {
+        savePendingPushFlag(true);
+        setHasPendingSheetSync(true);
+        return {
+          ok: false,
+          error:
+            'শিটে ডেটা লিখতে প্রথমে Google Sign-In করুন অথবা নিচে "মূল শিট Save/Push Apps Script Web App URL" যুক্ত করুন।',
+        };
+      }
+
+      const curDb = dbRef.current;
+      if (countAllocationDatabaseRecords(curDb) === 0 && !hadNonEmptyDbRef.current) {
+        return {
+          ok: false,
+          error:
+            'অ্যাপে এখনো কোনো বরাদ্দ বা ডিও ডেটা নেই। খালি অ্যাপ থেকে Push করলে Google Sheet-এর বিদ্যমান ডেটা মুছে যেতে পারে—তাই আগে «লিংক সেভ ও শিট থেকে ডেটা আনুন» বাটনে ক্লিক করে শিট থেকে ডেটা আনুন।',
+        };
+      }
+
+      const hasExternalChallanSource = Boolean(
+        extractSpreadsheetId(cfg.challanSpreadsheetId || '') ||
+          String(cfg.challanAppsScriptUrl || '').trim()
+      );
+      const hasManualChallans = curDb.challans.some((c) => c.id.startsWith('chln-'));
+      const writeOpts = {
+        skipChallansTab:
+          hasExternalChallanSource && !hasManualChallans && !touchedMainChallansRef.current,
+        allowEmptyOverwrite: hadNonEmptyDbRef.current,
+      };
+      const snapshotJson = JSON.stringify(curDb);
+      isPushingRef.current = true;
+      setIsSyncingSheets(true);
+      let pushSucceeded = false;
+      try {
+        let tabsUpdated = 0;
+        let modeLabel = 'Google OAuth';
+
+        if (token && targetId) {
+          try {
+            const res = await writeAllocationDatabaseToOAuthSheet(
+              token,
+              targetId,
+              curDb,
+              writeOpts
+            );
+            tabsUpdated = res.tabsUpdated;
+          } catch (oauthErr) {
+            if (oauthErr instanceof GoogleAuthExpiredError) {
+              clearGoogleAccessToken();
+              setGoogleAccessToken(null);
+              tokenRef.current = null;
+            }
+            if (gasUrl) {
+              const gasRes = await writeAllocationDatabaseToAppsScript(
+                gasUrl,
+                targetId,
+                curDb,
+                writeOpts
+              );
+              tabsUpdated = gasRes.tabsUpdated;
+              modeLabel = 'Apps Script';
+            } else {
+              throw oauthErr;
+            }
+          }
+        } else if (gasUrl) {
+          const gasRes = await writeAllocationDatabaseToAppsScript(
+            gasUrl,
+            targetId,
+            curDb,
+            writeOpts
+          );
+          tabsUpdated = gasRes.tabsUpdated;
+          modeLabel = 'Apps Script';
+        }
+
+        pushSucceeded = true;
+        touchedMainChallansRef.current = false;
+        lastSyncedDbJsonRef.current = snapshotJson;
+        savePendingPushFlag(false);
+        setHasPendingSheetSync(false);
+        const targetKey = getWriteTargetKey(targetId, gasUrl);
+        setSheetsConfig((prev) => {
+          const confirmed = prev.writeConfirmedSheetIds || [];
+          const nextConfirmed =
+            targetKey && !confirmed.includes(targetKey) ? [...confirmed, targetKey] : confirmed;
+          return {
+            ...prev,
+            enabled: true,
+            spreadsheetId: targetId || prev.spreadsheetId,
+            appsScriptUrl: gasUrl || prev.appsScriptUrl,
+            writeConfirmedSheetIds: nextConfirmed,
+            lastSyncAt: new Date().toISOString(),
+            lastSyncStatus: 'ok',
+            lastSyncMessage: `সকল ডেটা Google Sheet-এ (${toBnDigits(tabsUpdated)}টি ট্যাব · ${modeLabel}) সেভ হয়েছে`,
+          };
+        });
+        return {
+          ok: true,
+          message: `সকল বরাদ্দ, ডিও, চালান ও সেটিংস Google Sheet-এ (${modeLabel}) সেভ হয়েছে!`,
+        };
+      } catch (err) {
+        if (err instanceof GoogleAuthExpiredError) {
+          clearGoogleAccessToken();
+          setGoogleAccessToken(null);
+          tokenRef.current = null;
+        }
+        savePendingPushFlag(true);
+        setHasPendingSheetSync(true);
+        const msg = err instanceof Error ? err.message : 'শিটে সংরক্ষণ ব্যর্থ হয়েছে।';
+        setSheetsConfig((prev) => ({
+          ...prev,
+          lastSyncStatus: 'error',
+          lastSyncMessage: `শিটে সেভ ব্যর্থ: ${msg}`,
+        }));
+        return { ok: false, error: msg };
+      } finally {
+        isPushingRef.current = false;
+        setIsSyncingSheets(false);
+        if (pushSucceeded && pendingAutoPushRef.current) {
+          pendingAutoPushRef.current = false;
+          if (JSON.stringify(dbRef.current) !== lastSyncedDbJsonRef.current) {
+            setTimeout(() => {
+              void pushToGoogleSheet();
+            }, 50);
+          }
+        } else if (!pushSucceeded) {
+          pendingAutoPushRef.current = false;
+        }
+      }
+    },
+    []
+  );
+
+  const buildWriteConfirmRequest = useCallback(
+    (overrideGasUrl?: string, overrideSheetId?: string): SheetWriteConfirmRequest => {
+      const cfg = sheetsConfigRef.current;
+      const curDb = dbRef.current;
+      const targetId = extractSpreadsheetId(overrideSheetId ?? cfg.spreadsheetId);
+      const gasUrl = String(overrideGasUrl ?? cfg.appsScriptUrl ?? '').trim();
+      const targetName =
+        cfg.spreadsheetName ||
+        (targetId ? `Google Sheet (${targetId.slice(0, 12)}...)` : '') ||
+        (gasUrl ? 'সংযুক্ত Apps Script শিট' : 'সংযুক্ত Google Sheet');
+
+      return {
+        title: 'Google Sheet-এ সকল ডেটা সেভ নিশ্চিত করুন',
+        description:
+          'অ্যাপের সকল বরাদ্দ, উপবরাদ্দ, প্রকল্প, ডিও ইস্যু, চালান, ডিলার/মাস্টার তালিকা এবং টেমপ্লেট সেটিংস আপনার সংযুক্ত Google Sheet-এ হালনাগাদ ও সংরক্ষণ করা হবে।',
+        spreadsheetName: targetName,
+        targetSheets: Object.values(ALLOC_SHEET_TABS).map((t) => t.name),
+        details: [
+          `মন্ত্রণালয় ও ডিসি বরাদ্দ: ${toBnDigits(curDb.ministryAllocations.length + curDb.dcAllocations.length)}টি`,
+          `ডিলার ও ইউএনও উপবরাদ্দ: ${toBnDigits(curDb.dealerSuballocations.length + curDb.unoSuballocations.length)}টি (প্রকল্প ${toBnDigits(curDb.projects.length)}টি)`,
+          `ডিও বই ও ইস্যু: ${toBnDigits(curDb.doBooks.length)}টি বই, ${toBnDigits(curDb.doIssues.length)}টি ডিও`,
+          `ট্রেজারি চালান ও ডিলার তালিকা: ${toBnDigits(curDb.challans.length)}টি চালান, ${toBnDigits(curDb.foodDealers.length + curDb.omsDealers.length)} জন ডিলার`,
+        ],
+        isDestructive: true,
+        confirmLabel: 'নিশ্চিত ও Google Sheet-এ সেভ করুন',
+      };
+    },
+    []
+  );
+
+  const requestPushToGoogleSheet = useCallback(
+    (overrideGasUrl?: string, overrideSheetId?: string): Promise<ActionResult> => {
+      const cfg = sheetsConfigRef.current;
+      const targetId = extractSpreadsheetId(overrideSheetId ?? cfg.spreadsheetId);
+      const gasUrl = String(overrideGasUrl ?? cfg.appsScriptUrl ?? '').trim();
+      const token = tokenRef.current ?? getGoogleAccessToken();
+
+      if (!targetId && !gasUrl) {
+        return Promise.resolve({
+          ok: false,
+          error: 'প্রথমে মূল Google Sheet ID অথবা Apps Script Web App URL যুক্ত করুন।',
+        });
+      }
+      if (!token && !gasUrl) {
+        savePendingPushFlag(true);
+        setHasPendingSheetSync(true);
+        return Promise.resolve({
+          ok: false,
+          error:
+            'শিটে ডেটা লিখতে প্রথমে Google Sign-In করুন অথবা নিচে "মূল শিট Save/Push Apps Script Web App URL" যুক্ত করুন।',
+        });
+      }
+
+      if (countAllocationDatabaseRecords(dbRef.current) === 0 && !hadNonEmptyDbRef.current) {
+        return Promise.resolve({
+          ok: false,
+          error:
+            'অ্যাপে এখনো কোনো বরাদ্দ বা ডিও ডেটা নেই। খালি অ্যাপ থেকে Push করলে Google Sheet-এর বিদ্যমান ডেটা মুছে যেতে পারে—তাই আগে «লিংক সেভ ও শিট থেকে ডেটা আনুন» বাটনে ক্লিক করে শিট থেকে ডেটা আনুন।',
+        });
+      }
+
+      const targetKey = getWriteTargetKey(targetId, gasUrl);
+      const request = buildWriteConfirmRequest(overrideGasUrl, overrideSheetId);
+
+      return new Promise<ActionResult>((resolve) => {
+        setWriteConfirmState({
+          request,
+          targetKey,
+          overrideGasUrl,
+          overrideSheetId,
+          resolveResult: resolve,
+        });
+      });
+    },
+    [buildWriteConfirmRequest]
+  );
+
+  const confirmPendingSheetWrite = useCallback(async () => {
+    const pending = writeConfirmState;
+    if (!pending) return;
+    if (pending.targetKey) {
+      setSheetsConfig((prev) => {
+        const list = prev.writeConfirmedSheetIds || [];
+        return list.includes(pending.targetKey)
+          ? prev
+          : { ...prev, writeConfirmedSheetIds: [...list, pending.targetKey] };
+      });
+    }
+    const res = await pushToGoogleSheet(pending.overrideGasUrl, pending.overrideSheetId);
+    setWriteConfirmState(null);
+    pending.resolveResult?.(res);
+  }, [pushToGoogleSheet, writeConfirmState]);
+
+  const cancelPendingSheetWrite = useCallback(() => {
+    const pending = writeConfirmState;
+    setWriteConfirmState(null);
+    pending?.resolveResult?.({
+      ok: false,
+      error: 'ব্যবহারকারী Google Sheet সেভ বাতিল করেছেন।',
+    });
+  }, [writeConfirmState]);
 
   const autoDetectAndSyncDriveSheets = useCallback(
     async (tokenOverride?: string | null): Promise<ActionResult> => {
@@ -1816,12 +2432,38 @@ export function useAllocationStore() {
       tokenRef.current = accessToken;
 
       const cfg = sheetsConfigRef.current;
-      if (cfg.spreadsheetId || cfg.challanSpreadsheetId || cfg.challanAppsScriptUrl) {
+      const targetId = extractSpreadsheetId(cfg.spreadsheetId);
+      const gasUrl = String(cfg.appsScriptUrl || '').trim();
+      const pendingLocal =
+        loadPendingPushFlag() || JSON.stringify(dbRef.current) !== lastSyncedDbJsonRef.current;
+
+      if (pendingLocal && targetId) {
+        const targetKey = getWriteTargetKey(targetId, gasUrl);
+        const isConfirmed = Boolean(targetKey && (cfg.writeConfirmedSheetIds || []).includes(targetKey));
+        if (isConfirmed) {
+          const pushRes = await pushToGoogleSheet(gasUrl, targetId, accessToken);
+          return pushRes.ok
+            ? { ok: true, message: 'Google সাইন-ইন ও অপেক্ষমাণ সকল এন্ট্রি শিটে সেভ হয়েছে!' }
+            : pushRes;
+        }
+        return {
+          ok: true,
+          message: 'Google সাইন-ইন সম্পন্ন! অপেক্ষমাণ এন্ট্রি শিটে পাঠাতে "শিটে সেভ করুন" নিশ্চিত করুন।',
+        };
+      }
+
+      if (
+        cfg.spreadsheetId ||
+        cfg.appsScriptUrl ||
+        cfg.challanSpreadsheetId ||
+        cfg.challanAppsScriptUrl
+      ) {
         await syncFromGoogleSheet(
           cfg.spreadsheetId,
           cfg.challanSpreadsheetId,
           cfg.challanAppsScriptUrl,
-          accessToken
+          accessToken,
+          cfg.appsScriptUrl
         );
       } else {
         await autoDetectAndSyncDriveSheets(accessToken);
@@ -1834,7 +2476,7 @@ export function useAllocationStore() {
     } finally {
       setIsGoogleSigningIn(false);
     }
-  }, [autoDetectAndSyncDriveSheets, syncFromGoogleSheet]);
+  }, [autoDetectAndSyncDriveSheets, pushToGoogleSheet, syncFromGoogleSheet]);
 
   const handleGoogleSignOut = useCallback(async () => {
     await googleLogout();
@@ -1843,50 +2485,164 @@ export function useAllocationStore() {
     setDriveFiles([]);
   }, []);
 
+  const cancelGoogleSignIn = useCallback(() => {
+    cancelPendingAndroidSignIn();
+    setIsGoogleSigningIn(false);
+    setGoogleAuthError(
+      'Google সাইন-ইন বাতিল করা হয়েছে। চাইলে লগইন ছাড়াই নিচে Apps Script URL দিয়ে শিটে সেভ করতে পারবেন।'
+    );
+  }, []);
+
   useEffect(() => {
     if (initialAutoSyncDoneRef.current) return;
     initialAutoSyncDoneRef.current = true;
     const cfg = sheetsConfigRef.current;
+    // Never overwrite unsynced local entries on startup!
+    if (loadPendingPushFlag()) {
+      setHasPendingSheetSync(true);
+      return;
+    }
     if (
       cfg.autoSync !== false &&
-      (cfg.spreadsheetId || cfg.challanSpreadsheetId || cfg.challanAppsScriptUrl)
+      (cfg.spreadsheetId ||
+        cfg.appsScriptUrl ||
+        cfg.challanSpreadsheetId ||
+        cfg.challanAppsScriptUrl)
     ) {
       void syncFromGoogleSheet(
         cfg.spreadsheetId,
         cfg.challanSpreadsheetId,
-        cfg.challanAppsScriptUrl
+        cfg.challanAppsScriptUrl,
+        undefined,
+        cfg.appsScriptUrl
       );
     }
   }, [syncFromGoogleSheet]);
 
-  const pushToGoogleSheet = useCallback(async (): Promise<ActionResult> => {
-    const targetId = extractSpreadsheetId(sheetsConfig.spreadsheetId);
-    if (!targetId) return { ok: false, error: 'প্রথমে Google Sheet ID যুক্ত করুন।' };
-    const token = googleAccessToken || getGoogleAccessToken();
-    if (!token) {
-      return { ok: false, error: 'শিটে ডেটা লিখতে প্রথমে Google Sign-In করুন।' };
+  const scheduleAutoPush = useCallback(() => {
+    const cfg = sheetsConfigRef.current;
+    const targetId = extractSpreadsheetId(cfg.spreadsheetId);
+    const gasUrl = String(cfg.appsScriptUrl || '').trim();
+    const hasWriteTarget = Boolean(targetId || gasUrl);
+
+    if (countAllocationDatabaseRecords(dbRef.current) === 0 && !hadNonEmptyDbRef.current) {
+      return;
     }
-    setIsSyncingSheets(true);
-    try {
-      const res = await writeAllocationDatabaseToOAuthSheet(token, targetId, db);
-      setSheetsConfig((prev) => ({
-        ...prev,
-        lastSyncAt: new Date().toISOString(),
-        lastSyncStatus: 'ok',
-        lastSyncMessage: `সকল ডেটা Google Sheet-এ (${toBnDigits(res.tabsUpdated)}টি ট্যাব) সেভ হয়েছে`,
-      }));
-      return { ok: true, message: 'সকল বরাদ্দ, ডিও, চালান ও সেটিংস Google Sheet-এ সেভ হয়েছে!' };
-    } catch (err) {
-      if (err instanceof GoogleAuthExpiredError) {
-        clearGoogleAccessToken();
-        setGoogleAccessToken(null);
+
+    const currentJson = JSON.stringify(dbRef.current);
+    const isDirty = currentJson !== lastSyncedDbJsonRef.current;
+
+    if (hasWriteTarget && isDirty) {
+      savePendingPushFlag(true);
+      setHasPendingSheetSync(true);
+    } else if (!isDirty) {
+      savePendingPushFlag(false);
+      setHasPendingSheetSync(false);
+    }
+
+    if (cfg.autoSync === false || !hasWriteTarget) return;
+
+    const token = tokenRef.current || getGoogleAccessToken();
+    const canWrite = Boolean(gasUrl || (token && targetId));
+    const targetKey = getWriteTargetKey(targetId, gasUrl);
+    const isConfirmed = Boolean(targetKey && (cfg.writeConfirmedSheetIds || []).includes(targetKey));
+
+    if (!canWrite || !isConfirmed || !isDirty) return;
+
+    if (autoPushTimerRef.current) {
+      clearTimeout(autoPushTimerRef.current);
+    }
+    autoPushTimerRef.current = setTimeout(() => {
+      autoPushTimerRef.current = null;
+      const latestJson = JSON.stringify(dbRef.current);
+      if (latestJson === lastSyncedDbJsonRef.current) return;
+      if (isPushingRef.current) {
+        pendingAutoPushRef.current = true;
+        return;
       }
-      const msg = err instanceof Error ? err.message : 'শিটে সংরক্ষণ ব্যর্থ হয়েছে।';
-      return { ok: false, error: msg };
-    } finally {
-      setIsSyncingSheets(false);
+      void pushToGoogleSheet();
+    }, 450);
+  }, [pushToGoogleSheet]);
+
+  useEffect(() => {
+    scheduleAutoPush();
+    return () => {
+      if (autoPushTimerRef.current) {
+        clearTimeout(autoPushTimerRef.current);
+      }
+    };
+  }, [
+    db,
+    googleAccessToken,
+    sheetsConfig.appsScriptUrl,
+    sheetsConfig.spreadsheetId,
+    sheetsConfig.autoSync,
+    sheetsConfig.writeConfirmedSheetIds,
+    scheduleAutoPush,
+  ]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof document === 'undefined') return;
+    const flushPendingPush = () => {
+      const cfg = sheetsConfigRef.current;
+      if (cfg.autoSync === false) return;
+      const targetId = extractSpreadsheetId(cfg.spreadsheetId);
+      const gasUrl = String(cfg.appsScriptUrl || '').trim();
+      const token = tokenRef.current || getGoogleAccessToken();
+      const canWrite = Boolean(gasUrl || (token && targetId));
+      const targetKey = getWriteTargetKey(targetId, gasUrl);
+      const isConfirmed = Boolean(targetKey && (cfg.writeConfirmedSheetIds || []).includes(targetKey));
+      const isDirty = JSON.stringify(dbRef.current) !== lastSyncedDbJsonRef.current;
+      if (countAllocationDatabaseRecords(dbRef.current) === 0 && !hadNonEmptyDbRef.current) return;
+      if (!canWrite || !isConfirmed || !isDirty) return;
+      if (autoPushTimerRef.current) {
+        clearTimeout(autoPushTimerRef.current);
+        autoPushTimerRef.current = null;
+      }
+      if (isPushingRef.current) {
+        pendingAutoPushRef.current = true;
+        return;
+      }
+      void pushToGoogleSheet();
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') flushPendingPush();
+    };
+    window.addEventListener('pagehide', flushPendingPush);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      window.removeEventListener('pagehide', flushPendingPush);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [pushToGoogleSheet]);
+
+  const sheetSyncState: SheetSyncUiState = useMemo(() => {
+    const targetId = extractSpreadsheetId(sheetsConfig.spreadsheetId);
+    const gasUrl = String(sheetsConfig.appsScriptUrl || '').trim();
+    if (!targetId && !gasUrl) return 'unlinked';
+    if (isSyncingSheets) return 'syncing';
+    const token = googleAccessToken || getGoogleAccessToken();
+    const canWrite = Boolean(gasUrl || (token && targetId));
+    if (hasPendingSheetSync) {
+      if (!canWrite) return 'needs_auth';
+      const targetKey = getWriteTargetKey(targetId, gasUrl);
+      const isConfirmed = Boolean(
+        targetKey && (sheetsConfig.writeConfirmedSheetIds || []).includes(targetKey)
+      );
+      if (!isConfirmed) return 'needs_write_confirm';
     }
-  }, [db, googleAccessToken, sheetsConfig.spreadsheetId]);
+    if (sheetsConfig.lastSyncStatus === 'error') return 'error';
+    if (hasPendingSheetSync) return 'pending_push';
+    return 'synced';
+  }, [
+    googleAccessToken,
+    hasPendingSheetSync,
+    isSyncingSheets,
+    sheetsConfig.appsScriptUrl,
+    sheetsConfig.lastSyncStatus,
+    sheetsConfig.spreadsheetId,
+    sheetsConfig.writeConfirmedSheetIds,
+  ]);
 
   const exportBackupJson = useCallback(() => {
     const blob = new Blob([JSON.stringify({ db, sheetsConfig }, null, 2)], {
@@ -1926,12 +2682,19 @@ export function useAllocationStore() {
   }, []);
 
   const clearAllLocalData = useCallback(() => {
+    hadNonEmptyDbRef.current = false;
     const emptyBase = createEmptyAllocationDatabase();
-    setDb((prev) => ({
-      ...emptyBase,
-      officer: prev.officer,
-      templates: prev.templates,
-    }));
+    setDb((prev) => {
+      const cleared = {
+        ...emptyBase,
+        officer: prev.officer,
+        templates: prev.templates,
+      };
+      lastSyncedDbJsonRef.current = JSON.stringify(cleared);
+      return cleared;
+    });
+    savePendingPushFlag(false);
+    setHasPendingSheetSync(false);
   }, []);
 
   const unusedDoList = useMemo(() => getUnusedDoNumbers(db), [db]);
@@ -1945,6 +2708,11 @@ export function useAllocationStore() {
     isGoogleSigningIn,
     googleAuthError,
     isSyncingSheets,
+    hasPendingSheetSync,
+    sheetSyncState,
+    pendingWriteConfirmRequest: writeConfirmState?.request || null,
+    confirmPendingSheetWrite,
+    cancelPendingSheetWrite,
     driveFiles,
     unusedDoList,
     getMinistryUsage,
@@ -1966,6 +2734,7 @@ export function useAllocationStore() {
     updateUNOSuballocation,
     deleteUNOSuballocation,
     saveDOBook,
+    updateDOBook,
     deleteDOBook,
     saveChallan,
     deleteChallan,
@@ -1989,11 +2758,14 @@ export function useAllocationStore() {
     saveReportMemo,
     handleGoogleSignIn,
     handleGoogleSignOut,
+    cancelGoogleSignIn,
     syncFromGoogleSheet,
     autoDetectAndSyncDriveSheets,
     pushToGoogleSheet,
+    requestPushToGoogleSheet,
     exportBackupJson,
     importBackupJson,
     clearAllLocalData,
   };
 }
+

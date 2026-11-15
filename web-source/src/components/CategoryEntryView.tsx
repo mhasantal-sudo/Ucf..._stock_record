@@ -179,12 +179,23 @@ interface CategoryEntryViewProps {
   ) => ActionResult;
   onDeleteUNOSub: (id: string) => void;
   onSaveDOBook?: (input: { bookNo: number; startPage: number; endPage: number }) => ActionResult;
+  onUpdateDOBook?: (
+    id: string,
+    input: { bookNo: number; startPage: number; endPage: number }
+  ) => ActionResult;
   onDeleteDOBook?: (id: string) => void;
   verifyChallan?: (
     category: AllocationCategory,
     dealerName: string,
     qty: number,
-    opts?: { subId?: string; unoDate?: string; unoMemo?: string }
+    opts?: {
+      subId?: string;
+      unoDate?: string;
+      unoMemo?: string;
+      issueDate?: string;
+      excludeDoId?: string;
+      excludeChallanIds?: Set<string>;
+    }
   ) => {
     applicable: boolean;
     ok: boolean;
@@ -226,6 +237,16 @@ interface CategoryEntryViewProps {
   onTransferProject?: (
     id: string,
     target: { category?: AllocationCategory; dcMemo: string }
+  ) => ActionResult;
+  onUpdateProject?: (
+    id: string,
+    patch: {
+      projectNo: string;
+      projectName: string;
+      presidentName: string;
+      unionName: string;
+      allocationQty: number;
+    }
   ) => ActionResult;
   onDeleteProject?: (id: string) => void;
   onOpenPendingProjectsWorkspace?: () => void;
@@ -301,6 +322,7 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
   onUpdateUNOSub,
   onDeleteUNOSub,
   onSaveDOBook,
+  onUpdateDOBook,
   onDeleteDOBook,
   verifyChallan,
   onIssueDOBatch,
@@ -313,6 +335,7 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
   onLockProjectEntry,
   onUpdateOfficer,
   onTransferProject,
+  onUpdateProject,
   onDeleteProject,
   onOpenPendingProjectsWorkspace,
 }) => {
@@ -329,6 +352,7 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
   const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
 
   // Office-level ("দপ্তরভিত্তিক") Ministry Entry state
+  const [editingOfficeMinId, setEditingOfficeMinId] = useState<string | null>(null);
   const [offMinCat, setOffMinCat] = useState<AllocationCategory>(selectedCategory);
   const [offMinMemo, setOffMinMemo] = useState('');
   const [offMinDate, setOffMinDate] = useState(todayIsoDate());
@@ -343,6 +367,22 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
     inspectedMinMemo?: string;
     subSourceMemo?: string;
     inspectedSubSourceMemo?: string;
+    editDcRecord?: {
+      id: string;
+      ministryMemo: string;
+      dcMemo: string;
+      dcMemoDate: string;
+      allocationQty: number;
+    };
+    editSubRow?: {
+      id: string;
+      kind: 'dealer' | 'uno';
+      unoMemo: string;
+      unoDate: string;
+      recipient: string;
+      unionName: string;
+      qty: string;
+    };
   } | null>(null);
 
   // Horizontal swipe pager refs for seamless left/right step navigation
@@ -402,6 +442,22 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
   const [transferringProjId, setTransferringProjId] = useState<string | null>(null);
   const [transferTargetCat, setTransferTargetCat] = useState<AllocationCategory>(selectedCategory);
   const [transferTargetDcMemo, setTransferTargetDcMemo] = useState('');
+  const [editingStep2Proj, setEditingStep2Proj] = useState<{
+    id: string;
+    projectNo: string;
+    projectName: string;
+    presidentName: string;
+    unionName: string;
+    allocationQty: string;
+  } | null>(null);
+  const [editingPendingProj, setEditingPendingProj] = useState<{
+    id: string;
+    projectNo: string;
+    projectName: string;
+    presidentName: string;
+    unionName: string;
+    allocationQty: string;
+  } | null>(null);
   const [projSwipeOffsets, setProjSwipeOffsets] = useState<Record<string, number>>({});
   const projSwipeStartRef = useRef<{ id: string; startX: number; startY: number } | null>(null);
 
@@ -606,6 +662,8 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
     setActiveSubTab(defaultSubTab);
     setExpandedPendingProjId(null);
     setTransferringProjId(null);
+    setEditingStep2Proj(null);
+    setEditingPendingProj(null);
     if (meta.supportsProjects) {
       setTransferTargetCat(selectedCategory);
     }
@@ -615,15 +673,40 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
 
     if (jump) {
       setActiveStep(jump.step);
-      window.requestAnimationFrame(() => scrollToStep(jump.step, true));
       if (jump.dcMinMemo !== undefined) setDcMinMemo(jump.dcMinMemo);
       if (jump.inspectedMinMemo !== undefined) setInspectedMinMemo(jump.inspectedMinMemo);
       if (jump.subSourceMemo !== undefined) setSubSourceMemo(jump.subSourceMemo);
       if (jump.inspectedSubSourceMemo !== undefined) {
         setInspectedSubSourceMemo(jump.inspectedSubSourceMemo);
       }
+      if (jump.editDcRecord) {
+        setEditingDcId(jump.editDcRecord.id);
+        setDcMinMemo(jump.editDcRecord.ministryMemo);
+        setDcMemo(jump.editDcRecord.dcMemo);
+        setDcDate(jump.editDcRecord.dcMemoDate);
+        setDcQty(String(jump.editDcRecord.allocationQty));
+      } else {
+        setEditingDcId(null);
+      }
+      if (jump.editSubRow) {
+        setEditingSubRow(jump.editSubRow);
+        setAllocatedFilterCurrentMemo(false);
+        setActiveSubTab('allocated');
+      } else {
+        setEditingSubRow(null);
+      }
+      window.requestAnimationFrame(() => {
+        scrollToStep(jump.step, true);
+        if (jump.editSubRow) {
+          scrollToSubTab('allocated', true);
+        }
+      });
       return;
     }
+
+    setEditingMinId(null);
+    setEditingDcId(null);
+    setEditingSubRow(null);
 
     const nextStep: StepKey =
       lockedStage === 'dc'
@@ -1795,9 +1878,97 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
     onSelectCategory(targetCat);
   };
 
+  const jumpToCategoryEdit = (
+    targetCat: AllocationCategory,
+    step: StepKey,
+    opts: {
+      subSourceMemo?: string;
+      editDcRecord?: {
+        id: string;
+        ministryMemo: string;
+        dcMemo: string;
+        dcMemoDate: string;
+        allocationQty: number;
+      };
+      editSubRow?: {
+        id: string;
+        kind: 'dealer' | 'uno';
+        unoMemo: string;
+        unoDate: string;
+        recipient: string;
+        unionName: string;
+        qty: string;
+      };
+    }
+  ) => {
+    setEntryMode('category');
+    if (targetCat === selectedCategory) {
+      setActiveStep(step);
+      if (opts.editDcRecord) {
+        setEditingDcId(opts.editDcRecord.id);
+        setDcMinMemo(opts.editDcRecord.ministryMemo);
+        setDcMemo(opts.editDcRecord.dcMemo);
+        setDcDate(opts.editDcRecord.dcMemoDate);
+        setDcQty(String(opts.editDcRecord.allocationQty));
+      }
+      if (opts.editSubRow) {
+        if (opts.subSourceMemo) {
+          setSubSourceMemo(opts.subSourceMemo);
+          setInspectedSubSourceMemo(opts.subSourceMemo);
+        }
+        setAllocatedFilterCurrentMemo(false);
+        setEditingSubRow(opts.editSubRow);
+        setActiveSubTab('allocated');
+      }
+      window.requestAnimationFrame(() => {
+        scrollToStep(step);
+        if (opts.editSubRow) {
+          scrollToSubTab('allocated', true);
+        }
+      });
+      return;
+    }
+    pendingJumpRef.current = {
+      step,
+      dcMinMemo: opts.editDcRecord?.ministryMemo,
+      inspectedMinMemo: opts.editDcRecord?.ministryMemo,
+      subSourceMemo: opts.subSourceMemo,
+      inspectedSubSourceMemo: opts.subSourceMemo,
+      editDcRecord: opts.editDcRecord,
+      editSubRow: opts.editSubRow,
+    };
+    onSelectCategory(targetCat);
+  };
+
+  const resetOfficeMinForm = () => {
+    setEditingOfficeMinId(null);
+    setOffMinMemo('');
+    setOffMinDate(todayIsoDate());
+    setOffMinQty('');
+    setOffMinGrain(CATEGORY_BY_NAME[offMinCat]?.defaultGrain || 'চাল');
+    setOffMinPhase('1');
+    setOffMinComment('');
+  };
+
   const handleSaveOfficeMinistry = (e: React.FormEvent) => {
     e.preventDefault();
     const cMeta = CATEGORY_BY_NAME[offMinCat];
+    if (editingOfficeMinId && onUpdateMinistry) {
+      const res = onUpdateMinistry(editingOfficeMinId, {
+        memoNo: offMinMemo,
+        memoDate: offMinDate,
+        allocationQty: parseNum(offMinQty),
+        grain: offMinGrain,
+        phase: cMeta.hasPhase ? parseNum(offMinPhase) || 1 : undefined,
+        comment: offMinComment.trim() || undefined,
+      });
+      showResult(res);
+      if (res.ok) {
+        resetOfficeMinForm();
+      }
+      return;
+    }
+
     const res = onAddMinistry({
       category: offMinCat,
       memoNo: offMinMemo,
@@ -2114,21 +2285,38 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                 onSubmit={handleSaveOfficeMinistry}
                 className="lg:col-span-5 rounded-2xl border border-slate-200 bg-white p-4 space-y-3"
               >
-                <div className="flex items-center gap-2 text-sm font-bold text-slate-900">
-                  <FilePlus2 className="h-4 w-4 text-[#E2136E]" />
-                  <span>মন্ত্রণালয়ের নতুন বরাদ্দ এন্ট্রি (যেকোনো খাত)</span>
+                <div className="flex items-center justify-between gap-2 text-sm font-bold text-slate-900">
+                  <div className="flex items-center gap-2">
+                    <FilePlus2 className="h-4 w-4 text-[#E2136E]" />
+                    <span>
+                      {editingOfficeMinId
+                        ? 'মন্ত্রণালয়ের বরাদ্দ সংশোধন করুন'
+                        : 'মন্ত্রণালয়ের নতুন বরাদ্দ এন্ট্রি (যেকোনো খাত)'}
+                    </span>
+                  </div>
+                  {editingOfficeMinId && (
+                    <button
+                      type="button"
+                      onClick={resetOfficeMinForm}
+                      className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1 text-xs font-bold text-slate-600 hover:bg-slate-50 cursor-pointer"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                      <span>বাতিল</span>
+                    </button>
+                  )}
                 </div>
                 <div className="space-y-2.5 text-xs">
                   <div>
                     <label className="block font-bold text-slate-700 mb-1">খাত নির্বাচন করুন *</label>
                     <select
                       value={offMinCat}
+                      disabled={Boolean(editingOfficeMinId)}
                       onChange={(e) => {
                         const cat = e.target.value as AllocationCategory;
                         setOffMinCat(cat);
                         setOffMinGrain(CATEGORY_BY_NAME[cat]?.defaultGrain || 'চাল');
                       }}
-                      className="w-full rounded-lg border border-slate-300 px-3 py-2 bg-white font-bold focus:outline-none focus:border-[#E2136E]"
+                      className="w-full rounded-lg border border-slate-300 px-3 py-2 bg-white font-bold disabled:bg-slate-100 disabled:text-slate-600 focus:outline-none focus:border-[#E2136E]"
                     >
                       {CATEGORIES.map((c) => (
                         <option key={c.id} value={c.category}>
@@ -2212,12 +2400,23 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                     />
                   </div>
                 </div>
-                <button
-                  type="submit"
-                  className="w-full min-h-[44px] rounded-xl bg-[#E2136E] hover:bg-[#B80D58] text-white text-xs font-bold cursor-pointer"
-                >
-                  মন্ত্রণালয় বরাদ্দ সংরক্ষণ করুন
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="submit"
+                    className="flex-1 min-h-[44px] rounded-xl bg-[#E2136E] hover:bg-[#B80D58] text-white text-xs font-bold cursor-pointer"
+                  >
+                    {editingOfficeMinId ? 'মন্ত্রণালয় বরাদ্দ হালনাগাদ করুন' : 'মন্ত্রণালয় বরাদ্দ সংরক্ষণ করুন'}
+                  </button>
+                  {editingOfficeMinId && (
+                    <button
+                      type="button"
+                      onClick={resetOfficeMinForm}
+                      className="min-h-[44px] rounded-xl border border-slate-300 bg-white hover:bg-slate-50 px-4 text-xs font-bold text-slate-700 cursor-pointer"
+                    >
+                      বাতিল
+                    </button>
+                  )}
+                </div>
               </form>
 
               <div className="lg:col-span-7 rounded-2xl border border-slate-200 bg-white overflow-hidden">
@@ -2246,7 +2445,10 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                         allMinistryWithUsage.map(({ item: m, meta: mMeta, usage }) => {
                           const hasRem = usage.remaining > 0.0005;
                           return (
-                            <tr key={m.id} className="hover:bg-slate-50">
+                            <tr
+                              key={m.id}
+                              className={editingOfficeMinId === m.id ? 'bg-rose-50/60' : 'hover:bg-slate-50'}
+                            >
                               <td className="py-2 px-3">
                                 <div className="font-bold text-[#E2136E]">{m.category}</div>
                                 <div className="font-semibold text-slate-900">{toBnDigits(m.memoNo)}</div>
@@ -2274,10 +2476,35 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                                       {mMeta?.requiresDC ? 'ডিসি বরাদ্দ' : 'উপবরাদ্দ'}
                                     </button>
                                   )}
+                                  {onUpdateMinistry && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setEditingOfficeMinId(m.id);
+                                        setOffMinCat(m.category);
+                                        setOffMinMemo(m.memoNo);
+                                        setOffMinDate(m.memoDate);
+                                        setOffMinQty(String(m.allocationQty));
+                                        setOffMinGrain(m.grain);
+                                        setOffMinPhase(String(m.phase || 1));
+                                        setOffMinComment(m.comment || '');
+                                      }}
+                                      className="p-1 text-[#E2136E] hover:bg-rose-50 rounded cursor-pointer"
+                                      title="এডিট করুন"
+                                      aria-label="এডিট করুন"
+                                    >
+                                      <Pencil className="h-3.5 w-3.5" />
+                                    </button>
+                                  )}
                                   <button
                                     type="button"
-                                    onClick={() => onDeleteMinistry(m.id)}
+                                    onClick={() => {
+                                      if (editingOfficeMinId === m.id) resetOfficeMinForm();
+                                      onDeleteMinistry(m.id);
+                                    }}
                                     className="p-1 text-rose-600 hover:bg-rose-50 rounded cursor-pointer"
+                                    title="মুছুন"
+                                    aria-label="মুছুন"
                                   >
                                     <Trash2 className="h-3.5 w-3.5" />
                                   </button>
@@ -2422,10 +2649,33 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                                         উপবরাদ্দ দিন
                                       </button>
                                     )}
+                                    {onUpdateDC && (
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          jumpToCategoryEdit(d.category, 'dc', {
+                                            editDcRecord: {
+                                              id: d.id,
+                                              ministryMemo: d.ministryMemo,
+                                              dcMemo: d.dcMemo,
+                                              dcMemoDate: d.dcMemoDate,
+                                              allocationQty: d.allocationQty,
+                                            },
+                                          })
+                                        }
+                                        className="p-1 text-[#E2136E] hover:bg-rose-50 rounded cursor-pointer"
+                                        title="এডিট করুন"
+                                        aria-label="এডিট করুন"
+                                      >
+                                        <Pencil className="h-3.5 w-3.5" />
+                                      </button>
+                                    )}
                                     <button
                                       type="button"
                                       onClick={() => onDeleteDC(d.id)}
                                       className="p-1 text-rose-600 hover:bg-rose-50 rounded cursor-pointer"
+                                      title="মুছুন"
+                                      aria-label="মুছুন"
                                     >
                                       <Trash2 className="h-3.5 w-3.5" />
                                     </button>
@@ -2506,7 +2756,7 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                         <th className="py-2 px-3 text-left">খাত ও স্মারক</th>
                         <th className="py-2 px-3 text-left">প্রাপক / ইউনিয়ন</th>
                         <th className="py-2 px-3 text-right">পরিমাণ</th>
-                        <th className="py-2 px-3 text-center">মুছুন</th>
+                        <th className="py-2 px-3 text-center">কাজ</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
@@ -2533,14 +2783,45 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                               </div>
                             </td>
                             <td className="py-2 px-3 text-right font-bold">{formatBnQty(u.allocationQty)}</td>
-                            <td className="py-2 px-3 text-center">
-                              <button
-                                type="button"
-                                onClick={() => onDeleteUNOSub(u.id)}
-                                className="p-1 text-rose-600 hover:bg-rose-50 rounded cursor-pointer"
-                              >
-                                <Trash2 className="h-3.5 w-3.5" />
-                              </button>
+                            <td className="py-2 px-3 text-center whitespace-nowrap">
+                              <div className="inline-flex items-center gap-1">
+                                {onUpdateUNOSub && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const srcMemo = CATEGORY_BY_NAME[u.category]?.requiresDC
+                                        ? u.dcMemo
+                                        : u.ministryMemo;
+                                      jumpToCategoryEdit(u.category, 'sub', {
+                                        subSourceMemo: srcMemo,
+                                        editSubRow: {
+                                          id: u.id,
+                                          kind: 'uno',
+                                          unoMemo: u.unoMemo,
+                                          unoDate: u.unoDate,
+                                          recipient: u.recipientName,
+                                          unionName: u.unionName,
+                                          qty: String(u.allocationQty),
+                                        },
+                                      });
+                                    }}
+                                    className="p-1 text-[#E2136E] hover:bg-rose-50 rounded cursor-pointer"
+                                    title="এডিট করুন"
+                                    aria-label="এডিট করুন"
+                                  >
+                                    <Pencil className="h-3.5 w-3.5" />
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => onDeleteUNOSub(u.id)}
+                                  className="p-1 text-rose-600 hover:bg-rose-50 rounded cursor-pointer"
+                                  title="মুছুন"
+                                  aria-label="মুছুন"
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </button>
+                              </div>
                             </td>
                           </tr>
                         ))
@@ -2615,7 +2896,7 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                         <th className="py-2 px-3 text-left">খাত ও স্মারক</th>
                         <th className="py-2 px-3 text-left">ডিলার / প্রতিষ্ঠান</th>
                         <th className="py-2 px-3 text-right">পরিমাণ</th>
-                        <th className="py-2 px-3 text-center">মুছুন</th>
+                        <th className="py-2 px-3 text-center">কাজ</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
@@ -2639,14 +2920,42 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                               <div className="text-[11px] text-slate-500">{s.unionName}</div>
                             </td>
                             <td className="py-2 px-3 text-right font-bold">{formatBnQty(s.allocationQty)}</td>
-                            <td className="py-2 px-3 text-center">
-                              <button
-                                type="button"
-                                onClick={() => onDeleteDealerSub(s.id)}
-                                className="p-1 text-rose-600 hover:bg-rose-50 rounded cursor-pointer"
-                              >
-                                <Trash2 className="h-3.5 w-3.5" />
-                              </button>
+                            <td className="py-2 px-3 text-center whitespace-nowrap">
+                              <div className="inline-flex items-center gap-1">
+                                {onUpdateDealerSub && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      jumpToCategoryEdit(s.category, 'sub', {
+                                        subSourceMemo: s.sourceMemo,
+                                        editSubRow: {
+                                          id: s.id,
+                                          kind: 'dealer',
+                                          unoMemo: s.unoMemo,
+                                          unoDate: s.unoDate,
+                                          recipient: s.dealerName,
+                                          unionName: s.unionName,
+                                          qty: String(s.allocationQty),
+                                        },
+                                      })
+                                    }
+                                    className="p-1 text-[#E2136E] hover:bg-rose-50 rounded cursor-pointer"
+                                    title="এডিট করুন"
+                                    aria-label="এডিট করুন"
+                                  >
+                                    <Pencil className="h-3.5 w-3.5" />
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => onDeleteDealerSub(s.id)}
+                                  className="p-1 text-rose-600 hover:bg-rose-50 rounded cursor-pointer"
+                                  title="মুছুন"
+                                  aria-label="মুছুন"
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </button>
+                              </div>
                             </td>
                           </tr>
                         ))
@@ -3435,39 +3744,176 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                               <th className="py-1.5 px-3 text-left">প্রকল্প ও ইউনিয়ন</th>
                               <th className="py-1.5 px-3 text-left">ডিসি স্মারক</th>
                               <th className="py-1.5 px-3 text-right">পরিমাণ</th>
-                              {onDeleteProject && <th className="py-1.5 px-2 text-center">মুছুন</th>}
+                              {(onUpdateProject || onDeleteProject) && (
+                                <th className="py-1.5 px-2 text-center">কাজ</th>
+                              )}
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-slate-100">
-                            {catSavedProjects.map((p) => (
-                              <tr key={p.id}>
-                                <td className="py-1.5 px-3">
-                                  <div className="font-bold text-slate-900">
-                                    {toBnDigits(p.projectNo)} — {p.projectName}
-                                  </div>
-                                  <div className="text-[11px] text-slate-500">
-                                    {p.unionName}
-                                    {p.presidentName ? ` · সভাপতি: ${p.presidentName}` : ''}
-                                  </div>
-                                </td>
-                                <td className="py-1.5 px-3 text-slate-600">{toBnDigits(p.dcMemo)}</td>
-                                <td className="py-1.5 px-3 text-right font-bold">
-                                  {formatBnQty(p.allocationQty)}
-                                </td>
-                                {onDeleteProject && (
-                                  <td className="py-1.5 px-2 text-center">
-                                    <button
-                                      type="button"
-                                      onClick={() => onDeleteProject(p.id)}
-                                      className="p-1.5 text-rose-600 hover:bg-rose-50 rounded cursor-pointer"
-                                      title="প্রকল্প মুছুন"
-                                    >
-                                      <Trash2 className="h-3.5 w-3.5" />
-                                    </button>
+                            {catSavedProjects.map((p) => {
+                              const isEd = editingStep2Proj?.id === p.id;
+                              return (
+                                <tr key={p.id} className={isEd ? 'bg-rose-50/50' : ''}>
+                                  <td className="py-1.5 px-3">
+                                    {isEd ? (
+                                      <div className="space-y-1">
+                                        <div className="grid grid-cols-3 gap-1">
+                                          <input
+                                            type="text"
+                                            value={editingStep2Proj.projectNo}
+                                            onChange={(e) =>
+                                              setEditingStep2Proj((prev) =>
+                                                prev ? { ...prev, projectNo: e.target.value } : prev
+                                              )
+                                            }
+                                            placeholder="প্রকল্প নং"
+                                            className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px]"
+                                          />
+                                          <input
+                                            type="text"
+                                            value={editingStep2Proj.projectName}
+                                            onChange={(e) =>
+                                              setEditingStep2Proj((prev) =>
+                                                prev ? { ...prev, projectName: e.target.value } : prev
+                                              )
+                                            }
+                                            placeholder="প্রকল্পের নাম"
+                                            className="col-span-2 rounded border border-slate-300 bg-white px-2 py-1 text-[11px]"
+                                          />
+                                        </div>
+                                        <div className="grid grid-cols-2 gap-1">
+                                          <select
+                                            value={editingStep2Proj.unionName}
+                                            onChange={(e) =>
+                                              setEditingStep2Proj((prev) =>
+                                                prev ? { ...prev, unionName: e.target.value } : prev
+                                              )
+                                            }
+                                            className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px]"
+                                          >
+                                            <option value="">-- ইউনিয়ন --</option>
+                                            {getUnionOptions(editingStep2Proj.unionName).map((u) => (
+                                              <option key={u} value={u}>
+                                                {u}
+                                              </option>
+                                            ))}
+                                          </select>
+                                          <input
+                                            type="text"
+                                            value={editingStep2Proj.presidentName}
+                                            onChange={(e) =>
+                                              setEditingStep2Proj((prev) =>
+                                                prev ? { ...prev, presidentName: e.target.value } : prev
+                                              )
+                                            }
+                                            placeholder="সভাপতি / সম্পাদক"
+                                            className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px]"
+                                          />
+                                        </div>
+                                      </div>
+                                    ) : (
+                                      <>
+                                        <div className="font-bold text-slate-900">
+                                          {toBnDigits(p.projectNo)} — {p.projectName}
+                                        </div>
+                                        <div className="text-[11px] text-slate-500">
+                                          {p.unionName}
+                                          {p.presidentName ? ` · সভাপতি: ${p.presidentName}` : ''}
+                                        </div>
+                                      </>
+                                    )}
                                   </td>
-                                )}
-                              </tr>
-                            ))}
+                                  <td className="py-1.5 px-3 text-slate-600">{toBnDigits(p.dcMemo)}</td>
+                                  <td className="py-1.5 px-3 text-right font-bold">
+                                    {isEd ? (
+                                      <input
+                                        type="number"
+                                        step="0.001"
+                                        value={editingStep2Proj.allocationQty}
+                                        onChange={(e) =>
+                                          setEditingStep2Proj((prev) =>
+                                            prev ? { ...prev, allocationQty: e.target.value } : prev
+                                          )
+                                        }
+                                        className="w-20 rounded border border-slate-300 bg-white px-2 py-1 text-right text-[11px] font-bold"
+                                      />
+                                    ) : (
+                                      formatBnQty(p.allocationQty)
+                                    )}
+                                  </td>
+                                  {(onUpdateProject || onDeleteProject) && (
+                                    <td className="py-1.5 px-2 text-center whitespace-nowrap">
+                                      {isEd ? (
+                                        <div className="inline-flex items-center gap-1">
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              if (!onUpdateProject) return;
+                                              const res = onUpdateProject(p.id, {
+                                                projectNo: editingStep2Proj.projectNo,
+                                                projectName: editingStep2Proj.projectName,
+                                                presidentName: editingStep2Proj.presidentName,
+                                                unionName: editingStep2Proj.unionName,
+                                                allocationQty: parseNum(editingStep2Proj.allocationQty),
+                                              });
+                                              showResult(res);
+                                              if (res.ok) setEditingStep2Proj(null);
+                                            }}
+                                            className="p-1.5 text-white bg-[#E2136E] hover:bg-[#B80D58] rounded cursor-pointer"
+                                            title="সংরক্ষণ"
+                                          >
+                                            <Check className="h-3.5 w-3.5" />
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={() => setEditingStep2Proj(null)}
+                                            className="p-1.5 text-slate-600 bg-slate-100 hover:bg-slate-200 rounded cursor-pointer"
+                                            title="বাতিল"
+                                          >
+                                            <X className="h-3.5 w-3.5" />
+                                          </button>
+                                        </div>
+                                      ) : (
+                                        <div className="inline-flex items-center gap-1">
+                                          {onUpdateProject && (
+                                            <button
+                                              type="button"
+                                              onClick={() =>
+                                                setEditingStep2Proj({
+                                                  id: p.id,
+                                                  projectNo: p.projectNo,
+                                                  projectName: p.projectName,
+                                                  presidentName: p.presidentName,
+                                                  unionName: p.unionName,
+                                                  allocationQty: String(p.allocationQty),
+                                                })
+                                              }
+                                              className="p-1.5 text-[#E2136E] hover:bg-rose-50 rounded cursor-pointer"
+                                              title="প্রকল্প এডিট করুন"
+                                            >
+                                              <Pencil className="h-3.5 w-3.5" />
+                                            </button>
+                                          )}
+                                          {onDeleteProject && (
+                                            <button
+                                              type="button"
+                                              onClick={() => {
+                                                if (editingStep2Proj?.id === p.id) setEditingStep2Proj(null);
+                                                onDeleteProject(p.id);
+                                              }}
+                                              className="p-1.5 text-rose-600 hover:bg-rose-50 rounded cursor-pointer"
+                                              title="প্রকল্প মুছুন"
+                                            >
+                                              <Trash2 className="h-3.5 w-3.5" />
+                                            </button>
+                                          )}
+                                        </div>
+                                      )}
+                                    </td>
+                                  )}
+                                </tr>
+                              );
+                            })}
                           </tbody>
                         </table>
                       </div>
@@ -5302,11 +5748,62 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                                                   {formatBnQty(ep.pendingQty)} মে.টন
                                                 </span>
                                                 <div className="flex items-center gap-1.5">
+                                                  {effectiveProjectUnlocked && onUpdateProject && (
+                                                    <button
+                                                      type="button"
+                                                      onClick={() => {
+                                                        setExpandedPendingProjId(null);
+                                                        setTransferringProjId(null);
+                                                        setEditingPendingProj((prev) =>
+                                                          prev?.id === p.id
+                                                            ? null
+                                                            : {
+                                                                id: p.id,
+                                                                projectNo: p.projectNo,
+                                                                projectName: p.projectName,
+                                                                presidentName: p.presidentName,
+                                                                unionName: p.unionName,
+                                                                allocationQty: String(p.allocationQty),
+                                                              }
+                                                        );
+                                                      }}
+                                                      className={`min-h-[40px] inline-flex items-center rounded-lg border px-2.5 py-1.5 text-xs font-bold cursor-pointer ${
+                                                        editingPendingProj?.id === p.id
+                                                          ? 'bg-slate-900 border-slate-900 text-white'
+                                                          : 'border-rose-200 bg-rose-50 text-[#E2136E]'
+                                                      }`}
+                                                      title="প্রকল্প এডিট"
+                                                    >
+                                                      <Pencil className="h-3.5 w-3.5" />
+                                                    </button>
+                                                  )}
+                                                  {effectiveProjectUnlocked && onDeleteProject && (
+                                                    <button
+                                                      type="button"
+                                                      onClick={() => {
+                                                        if (editingPendingProj?.id === p.id) {
+                                                          setEditingPendingProj(null);
+                                                        }
+                                                        if (expandedPendingProjId === p.id) {
+                                                          setExpandedPendingProjId(null);
+                                                        }
+                                                        if (transferringProjId === p.id) {
+                                                          setTransferringProjId(null);
+                                                        }
+                                                        onDeleteProject(p.id);
+                                                      }}
+                                                      className="min-h-[40px] inline-flex items-center rounded-lg border border-rose-200 bg-white hover:bg-rose-50 px-2.5 py-1.5 text-xs font-bold text-rose-600 cursor-pointer"
+                                                      title="প্রকল্প মুছুন"
+                                                    >
+                                                      <Trash2 className="h-3.5 w-3.5" />
+                                                    </button>
+                                                  )}
                                                   {onTransferProject && (
                                                     <button
                                                       type="button"
                                                       onClick={() => {
                                                         setExpandedPendingProjId(null);
+                                                        setEditingPendingProj(null);
                                                         setTransferringProjId((prev) =>
                                                           prev === p.id ? null : p.id
                                                         );
@@ -5329,6 +5826,7 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                                                     type="button"
                                                     onClick={() => {
                                                       setTransferringProjId(null);
+                                                      setEditingPendingProj(null);
                                                       setExpandedPendingProjId((prev) =>
                                                         prev === p.id ? null : p.id
                                                       );
@@ -5444,28 +5942,148 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                                                     ))}
                                                   </select>
                                                 </div>
-                                                <div className="sm:col-span-3 flex gap-1">
+                                                  <div className="sm:col-span-3 flex gap-1">
+                                                    <button
+                                                      type="button"
+                                                      disabled={!transferTargetDcMemo}
+                                                      onClick={() => {
+                                                        const res = onTransferProject(p.id, {
+                                                          category: transferTargetCat,
+                                                          dcMemo: transferTargetDcMemo,
+                                                        });
+                                                        showResult(res);
+                                                        if (res.ok) setTransferringProjId(null);
+                                                      }}
+                                                      className="flex-1 min-h-[38px] rounded-lg bg-amber-600 hover:bg-amber-700 disabled:opacity-40 text-white font-bold px-2 cursor-pointer"
+                                                    >
+                                                      স্থানান্তর
+                                                    </button>
+                                                    <button
+                                                      type="button"
+                                                      onClick={() => setTransferringProjId(null)}
+                                                      className="min-h-[38px] rounded-lg border border-slate-300 bg-white px-2 text-slate-700 cursor-pointer"
+                                                    >
+                                                      <X className="h-3.5 w-3.5" />
+                                                    </button>
+                                                  </div>
+                                                </div>
+                                              )}
+
+                                            {editingPendingProj?.id === p.id && onUpdateProject && (
+                                              <div className="pt-2 border-t border-rose-200 bg-rose-50/50 rounded-lg p-2.5 grid grid-cols-1 sm:grid-cols-12 gap-2 items-end text-xs">
+                                                <div className="sm:col-span-2">
+                                                  <label className="block font-bold text-slate-700 mb-1">
+                                                    প্রকল্প নং *
+                                                  </label>
+                                                  <input
+                                                    type="text"
+                                                    value={editingPendingProj.projectNo}
+                                                    onChange={(e) =>
+                                                      setEditingPendingProj((prev) =>
+                                                        prev ? { ...prev, projectNo: e.target.value } : prev
+                                                      )
+                                                    }
+                                                    className="w-full min-h-[38px] rounded-lg border border-slate-300 bg-white px-2.5 py-1"
+                                                  />
+                                                </div>
+                                                <div className="sm:col-span-4">
+                                                  <label className="block font-bold text-slate-700 mb-1">
+                                                    প্রকল্পের নাম *
+                                                  </label>
+                                                  <input
+                                                    type="text"
+                                                    value={editingPendingProj.projectName}
+                                                    onChange={(e) =>
+                                                      setEditingPendingProj((prev) =>
+                                                        prev ? { ...prev, projectName: e.target.value } : prev
+                                                      )
+                                                    }
+                                                    className="w-full min-h-[38px] rounded-lg border border-slate-300 bg-white px-2.5 py-1"
+                                                  />
+                                                </div>
+                                                <div className="sm:col-span-2">
+                                                  <label className="block font-bold text-slate-700 mb-1">
+                                                    ইউনিয়ন *
+                                                  </label>
+                                                  <select
+                                                    value={editingPendingProj.unionName}
+                                                    onChange={(e) =>
+                                                      setEditingPendingProj((prev) =>
+                                                        prev ? { ...prev, unionName: e.target.value } : prev
+                                                      )
+                                                    }
+                                                    className="w-full min-h-[38px] rounded-lg border border-slate-300 bg-white px-2 py-1"
+                                                  >
+                                                    <option value="">-- ইউনিয়ন --</option>
+                                                    {getUnionOptions(editingPendingProj.unionName).map((u) => (
+                                                      <option key={u} value={u}>
+                                                        {u}
+                                                      </option>
+                                                    ))}
+                                                  </select>
+                                                </div>
+                                                <div className="sm:col-span-2">
+                                                  <label className="block font-bold text-slate-700 mb-1">
+                                                    সভাপতি
+                                                  </label>
+                                                  <input
+                                                    type="text"
+                                                    value={editingPendingProj.presidentName}
+                                                    onChange={(e) =>
+                                                      setEditingPendingProj((prev) =>
+                                                        prev
+                                                          ? { ...prev, presidentName: e.target.value }
+                                                          : prev
+                                                      )
+                                                    }
+                                                    className="w-full min-h-[38px] rounded-lg border border-slate-300 bg-white px-2.5 py-1"
+                                                  />
+                                                </div>
+                                                <div className="sm:col-span-2">
+                                                  <label className="block font-bold text-slate-700 mb-1">
+                                                    মোট মে.টন *
+                                                  </label>
+                                                  <input
+                                                    type="number"
+                                                    step="0.001"
+                                                    value={editingPendingProj.allocationQty}
+                                                    onChange={(e) =>
+                                                      setEditingPendingProj((prev) =>
+                                                        prev
+                                                          ? { ...prev, allocationQty: e.target.value }
+                                                          : prev
+                                                      )
+                                                    }
+                                                    className="w-full min-h-[38px] rounded-lg border border-slate-300 bg-white px-2 py-1 text-right font-bold tabular-nums"
+                                                  />
+                                                </div>
+                                                <div className="sm:col-span-12 flex justify-end gap-1.5">
                                                   <button
                                                     type="button"
-                                                    disabled={!transferTargetDcMemo}
                                                     onClick={() => {
-                                                      const res = onTransferProject(p.id, {
-                                                        category: transferTargetCat,
-                                                        dcMemo: transferTargetDcMemo,
+                                                      const res = onUpdateProject(p.id, {
+                                                        projectNo: editingPendingProj.projectNo,
+                                                        projectName: editingPendingProj.projectName,
+                                                        presidentName: editingPendingProj.presidentName,
+                                                        unionName: editingPendingProj.unionName,
+                                                        allocationQty: parseNum(
+                                                          editingPendingProj.allocationQty
+                                                        ),
                                                       });
                                                       showResult(res);
-                                                      if (res.ok) setTransferringProjId(null);
+                                                      if (res.ok) setEditingPendingProj(null);
                                                     }}
-                                                    className="flex-1 min-h-[38px] rounded-lg bg-amber-600 hover:bg-amber-700 disabled:opacity-40 text-white font-bold px-2 cursor-pointer"
+                                                    className="min-h-[38px] inline-flex items-center gap-1 rounded-lg bg-[#E2136E] hover:bg-[#B80D58] text-white font-bold px-3.5 cursor-pointer"
                                                   >
-                                                    স্থানান্তর
+                                                    <Check className="h-3.5 w-3.5" />
+                                                    <span>সংরক্ষণ</span>
                                                   </button>
                                                   <button
                                                     type="button"
-                                                    onClick={() => setTransferringProjId(null)}
-                                                    className="min-h-[38px] rounded-lg border border-slate-300 bg-white px-2 text-slate-700 cursor-pointer"
+                                                    onClick={() => setEditingPendingProj(null)}
+                                                    className="min-h-[38px] rounded-lg border border-slate-300 bg-white px-3 font-bold text-slate-700 cursor-pointer"
                                                   >
-                                                    <X className="h-3.5 w-3.5" />
+                                                    বাতিল
                                                   </button>
                                                 </div>
                                               </div>
@@ -5527,6 +6145,7 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                   lockedCategory={selectedCategory}
                   embedded={true}
                   onSaveDOBook={onSaveDOBook!}
+                  onUpdateDOBook={onUpdateDOBook}
                   onDeleteDOBook={onDeleteDOBook!}
                   verifyChallan={verifyChallan!}
                   onIssueDOBatch={onIssueDOBatch!}
@@ -5541,3 +6160,4 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
     </div>
   );
 };
+

@@ -252,3 +252,49 @@ export function memosLikelyMatch(
   }
   return false;
 }
+
+export function toIsoDateStr(raw: string | null | undefined): string {
+  const s = bnToEnDigits(String(raw ?? '')).trim();
+  if (!s) return '';
+  const mIso = s.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+  if (mIso) {
+    return `${mIso[1]}-${mIso[2].padStart(2, '0')}-${mIso[3].padStart(2, '0')}`;
+  }
+  const mDmy = s.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})/);
+  if (mDmy) {
+    const a = Number(mDmy[1]);
+    const b = Number(mDmy[2]);
+    const yr = mDmy[3];
+    const day = b > 12 ? b : a;
+    const mon = b > 12 ? a : b;
+    return `${yr}-${String(mon).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+  }
+  const parsed = new Date(s);
+  if (!Number.isNaN(parsed.getTime())) {
+    const y = parsed.getFullYear();
+    const m = String(parsed.getMonth() + 1).padStart(2, '0');
+    const d = String(parsed.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  return '';
+}
+
+export function isChallanOnOrBeforeDo(
+  challanDate: string | null | undefined,
+  doIssueDate: string | null | undefined,
+  requireChallanDate = true
+): boolean {
+  const cIso = toIsoDateStr(challanDate);
+  const dIso = toIsoDateStr(doIssueDate);
+  if (!dIso) return true;
+  if (!cIso) return !requireChallanDate;
+  return cIso <= dIso;
+}
+
+export function isSamePartyName(
+  a: string | null | undefined,
+  b: string | null | undefined
+): boolean {
+  return namesLikelyMatch(a, b) || namesFuzzyMatch(a, b);
+}
+

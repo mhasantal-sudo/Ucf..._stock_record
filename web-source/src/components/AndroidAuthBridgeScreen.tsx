@@ -93,3 +93,4 @@ export const AndroidAuthBridgeScreen: React.FC<AndroidAuthBridgeScreenProps> = (
     </div>
   );
 };
+

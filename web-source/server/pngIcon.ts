@@ -177,3 +177,4 @@ export function generateChallanPngIcon(options: PngIconOptions): Buffer {
     makeChunk('IEND', Buffer.alloc(0)),
   ]);
 }
+

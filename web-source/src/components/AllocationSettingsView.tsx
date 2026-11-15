@@ -5,12 +5,14 @@ import {
   BookOpen,
   CheckCircle2,
   CloudUpload,
+  Copy,
   Download,
   ExternalLink,
   FileCode2,
   FileSpreadsheet,
   FolderGit2,
   ImagePlus,
+  Pencil,
   PenTool,
   Plus,
   RefreshCw,
@@ -20,10 +22,12 @@ import {
   Trash2,
   Upload,
   Users,
+  X,
 } from 'lucide-react';
 import {
   CATEGORIES,
   REPORT_TEMPLATE_CATALOG,
+  createDefaultTemplate,
   type AllocationCategory,
   type AllocationDatabase,
   type AllocationSheetsConfig,
@@ -48,10 +52,12 @@ import {
   isInEmbeddedIframe,
   openExternalBrowserIfAndroid,
 } from '../shared/googleAuth';
+import { ALLOC_SHEET_TABS, buildMainAppsScriptCode } from '../shared/allocSheetsSync';
 import { triggerBlobDownload } from '../shared/downloadUtils';
 import { extractSpreadsheetId } from '../shared/googleSheetsSync';
 import { formatBnInt, formatBnMoney, formatBnQty, parseNum, toBnDigits } from '../shared/bnUtils';
-import type { ActionResult } from '../store/useAllocationStore';
+import type { ActionResult, SheetSyncUiState } from '../store/useAllocationStore';
+import { buildSourceZipClientFallback } from '../shared/sourceBundleClient';
 import { GoogleSignInButton } from './GoogleSignInButton';
 import { SourceCodeCopyModal } from './SourceCodeCopyModal';
 
@@ -71,12 +77,20 @@ interface AllocationSettingsViewProps {
   isGoogleSigningIn: boolean;
   googleAuthError: string | null;
   isSyncingSheets: boolean;
+  hasPendingSheetSync?: boolean;
+  sheetSyncState?: SheetSyncUiState;
   driveFiles?: DriveSpreadsheetFile[];
   onGoogleSignIn: () => Promise<ActionResult>;
   onGoogleSignOut: () => Promise<void>;
+  onCancelGoogleSignIn?: () => void;
   onAutoDetectDrive?: () => Promise<ActionResult>;
-  onSyncFromSheet: (idOrUrl?: string, challanIdOrUrl?: string, challanGasUrl?: string) => Promise<ActionResult>;
-  onPushToSheet: () => Promise<ActionResult>;
+  onSyncFromSheet: (
+    idOrUrl?: string,
+    challanIdOrUrl?: string,
+    challanGasUrl?: string,
+    mainGasUrl?: string
+  ) => Promise<ActionResult>;
+  onPushToSheet: (overrideGasUrl?: string, overrideSheetId?: string) => Promise<ActionResult>;
   onUpdateSheetsConfig: (patch: Partial<AllocationSheetsConfig>) => void;
   onUpdateOfficer: (patch: Partial<OfficerProfileSettings>) => void;
   onUpdateTemplate: (id: ReportTemplateId, patch: Partial<ReportTemplateConfig>) => void;
@@ -95,22 +109,7 @@ interface AllocationSettingsViewProps {
   onClearLocalData: () => void;
 }
 
-const SHEET_TABS_REFERENCE = [
-  'Ministry_Allocations',
-  'DC_Allocations',
-  'Dealer_Suballocation',
-  'Projects',
-  'UNO_Suballocations',
-  'DO_Books',
-  'DO_Issue',
-  'Challan',
-  'Food_Dealers',
-  'OMS_Dealers',
-  'Chairmen',
-  'Fire_Service',
-  'Category_Rates',
-  'Alloc_Settings',
-];
+const SHEET_TABS_REFERENCE = Object.values(ALLOC_SHEET_TABS).map((t) => t.name);
 
 const REPORT_DEFAULT_COLUMNS: Record<string, Array<{ key: string; label: string }>> = {
   'monthly-dist': [
@@ -124,6 +123,15 @@ const REPORT_DEFAULT_COLUMNS: Record<string, Array<{ key: string; label: string 
     { key: 'tr', label: 'মোট (চাল)' },
     { key: 'tw', label: 'মোট (গম)' },
     { key: 'ta', label: 'মোট (আটা)' },
+  ],
+  'alloc-summary': [
+    { key: 'cat', label: 'খাতের নাম' },
+    { key: 'grain', label: 'শস্য' },
+    { key: 'ministry', label: 'মন্ত্রণালয় বরাদ্দ' },
+    { key: 'dc', label: 'ডিসি বরাদ্দ' },
+    { key: 'sub', label: 'উপবরাদ্দ' },
+    { key: 'doQty', label: 'ডিও ইস্যু (বিতরণ)' },
+    { key: 'remaining', label: 'অবশিষ্ট / বাকি' },
   ],
   'monthly-cash': [
     { key: 'monthName', label: 'মাসের নাম' },
@@ -220,9 +228,12 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
   isGoogleSigningIn,
   googleAuthError,
   isSyncingSheets,
+  hasPendingSheetSync = false,
+  sheetSyncState = 'unlinked',
   driveFiles = [],
   onGoogleSignIn,
   onGoogleSignOut,
+  onCancelGoogleSignIn,
   onAutoDetectDrive,
   onSyncFromSheet,
   onPushToSheet,
@@ -252,16 +263,26 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
   const [challanUrlInput, setChallanUrlInput] = useState(
     sheetsConfig.challanAppsScriptUrl || ''
   );
+  const [mainGasUrlInput, setMainGasUrlInput] = useState(sheetsConfig.appsScriptUrl || '');
+  const [showMainGasCode, setShowMainGasCode] = useState(false);
+  const [copiedMainGasCode, setCopiedMainGasCode] = useState(false);
+  const [gasCodeMode, setGasCodeMode] = useState<'append' | 'standalone'>('append');
+  const activeMainGasCode = useMemo(
+    () => buildMainAppsScriptCode(sheetInput, gasCodeMode === 'standalone'),
+    [sheetInput, gasCodeMode]
+  );
   const backupFileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     setSheetInput(sheetsConfig.spreadsheetId || '');
     setChallanSheetInput(sheetsConfig.challanSpreadsheetId || '');
     setChallanUrlInput(sheetsConfig.challanAppsScriptUrl || '');
+    setMainGasUrlInput(sheetsConfig.appsScriptUrl || '');
   }, [
     sheetsConfig.spreadsheetId,
     sheetsConfig.challanSpreadsheetId,
     sheetsConfig.challanAppsScriptUrl,
+    sheetsConfig.appsScriptUrl,
   ]);
 
   // Signature Editor State
@@ -273,6 +294,10 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
 
   // Master sub-tab & quick add forms
   const [masterTab, setMasterTab] = useState<'food' | 'oms' | 'chairmen' | 'fire' | 'rates'>('food');
+  const [editingFoodId, setEditingFoodId] = useState<string | null>(null);
+  const [editingOmsId, setEditingOmsId] = useState<string | null>(null);
+  const [editingChairmanId, setEditingChairmanId] = useState<string | null>(null);
+  const [editingFireId, setEditingFireId] = useState<string | null>(null);
   const [newFood, setNewFood] = useState({
     dealerName: '',
     fatherName: '',
@@ -322,7 +347,13 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
     fileName?: string;
   } | null>(null);
 
-  const activeTemplate = db.templates[selectedTemplateId];
+  const activeTemplate =
+    db.templates[selectedTemplateId] ||
+    createDefaultTemplate(
+      REPORT_TEMPLATE_CATALOG.find((x) => x.id === selectedTemplateId) ||
+        REPORT_TEMPLATE_CATALOG[0],
+      db.officer
+    );
 
   const availableColumnsForTemplate = useMemo(() => {
     const item = REPORT_TEMPLATE_CATALOG.find((x) => x.id === selectedTemplateId);
@@ -484,6 +515,10 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
         }
         throw new Error(errMsg);
       }
+      const ct = (res.headers.get('content-type') || '').toLowerCase();
+      if (ct.includes('text/html')) {
+        throw new Error('স্ট্যাটিক হোস্টিংয়ে APK বিল্ড API চালু নেই — নিচের «সোর্স কোড (.zip)» বা «সব সোর্স কোড কপি করুন» ব্যবহার করুন।');
+      }
       const blob = await res.blob();
       if (blob.size === 0) throw new Error('ফাইলটি খালি পাওয়া গেছে।');
       const fileName = 'khaddo-boraddo-android-apk.zip';
@@ -502,32 +537,59 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
     }
   };
 
-  const handleDownloadSourceZip = async () => {
+  const handleDownloadSourceZip = async (scope: 'full' | 'web' = 'full') => {
     setSourceZipDownloading(true);
     setFeedback(null);
     setZipDownloadStatus(null);
-    const directServerUrl = `${apiBaseOrigin}/api/download-source-zip`;
-    const fileName = 'khaddo-boraddo-source-code.zip';
+    const qs = new URLSearchParams({
+      scope,
+      appName: apkAppName.trim() || DEFAULT_ANDROID_CONFIG.appName,
+      packageName: apkPackage.trim() || DEFAULT_ANDROID_CONFIG.packageName,
+    }).toString();
+    const directServerUrl = `${apiBaseOrigin}/api/download-source-zip?${qs}`;
+    const fileName =
+      scope === 'web' ? 'khaddo-boraddo-web-source.zip' : 'khaddo-boraddo-source-code.zip';
     try {
-      const res = await fetch(directServerUrl);
-      if (!res.ok) {
-        let errMsg = 'সোর্স কোড ZIP ডাউনলোড ব্যর্থ।';
-        try {
-          const data = (await res.json()) as { error?: string };
-          if (data?.error) errMsg = data.error;
-        } catch {
-          // Ignore non-JSON error body
+      let blob: Blob | null = null;
+      let usedClientFallback = false;
+      try {
+        const res = await fetch(directServerUrl, { cache: 'no-store' });
+        const ct = (res.headers.get('content-type') || '').toLowerCase();
+        if (res.ok && !ct.includes('text/html') && !ct.includes('application/json')) {
+          const candidate = await res.blob();
+          if (candidate.size > 0) blob = candidate;
         }
-        throw new Error(errMsg);
+      } catch {
+        // Fall through to client-side snapshot ZIP builder
       }
-      const blob = await res.blob();
-      if (blob.size === 0) throw new Error('ফাইলটি খালি পাওয়া গেছে।');
+
+      if (!blob) {
+        usedClientFallback = true;
+        blob = await buildSourceZipClientFallback(
+          scope,
+          apkAppName.trim() || DEFAULT_ANDROID_CONFIG.appName,
+          apkPackage.trim() || DEFAULT_ANDROID_CONFIG.packageName
+        );
+      }
+
+      if (!blob || blob.size === 0) throw new Error('ফাইলটি খালি পাওয়া গেছে।');
       triggerBlobDownload(blob, fileName);
-      const okMsg = 'সম্পূর্ণ ওয়েব ও অ্যান্ড্রয়েড সোর্স কোড ZIP ডাউনলোড শুরু হয়েছে!';
-      setZipDownloadStatus({ ok: true, text: okMsg, directUrl: directServerUrl, fileName });
+      const blobUrl = URL.createObjectURL(blob);
+      window.setTimeout(() => URL.revokeObjectURL(blobUrl), 120000);
+
+      const okMsg =
+        scope === 'web'
+          ? 'ওয়েব অ্যাপের সম্পূর্ণ সোর্স কোড ZIP ডাউনলোড শুরু হয়েছে!'
+          : 'সম্পূর্ণ ওয়েব + অ্যান্ড্রয়েড সোর্স কোড ZIP ডাউনলোড শুরু হয়েছে!';
+      setZipDownloadStatus({
+        ok: true,
+        text: okMsg,
+        directUrl: usedClientFallback ? blobUrl : directServerUrl,
+        fileName,
+      });
       setFeedback({ ok: true, text: okMsg });
     } catch (err) {
-      const errMsg = err instanceof Error ? err.message : 'ডাউনলোড ব্যর্থ।';
+      const errMsg = err instanceof Error ? err.message : 'সোর্স কোড ZIP ডাউনলোড ব্যর্থ।';
       setZipDownloadStatus({ ok: false, text: errMsg, directUrl: directServerUrl, fileName });
       setFeedback({ ok: false, text: errMsg });
     } finally {
@@ -546,7 +608,7 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
               { key: 'templates', label: 'রিপোর্ট ও রেজিস্টার টেমপ্লেট (২৪টি)', icon: Sliders },
               { key: 'officer', label: 'কর্মকর্তা ও স্বাক্ষর', icon: PenTool },
               { key: 'master', label: 'মাস্টার তালিকা ও দর', icon: Users },
-              { key: 'android', label: 'অ্যান্ড্রয়েড APK ও সোর্স', icon: FolderGit2 },
+              { key: 'android', label: 'সোর্স কোড ও APK', icon: FolderGit2 },
             ] as const
           ).map((t) => {
             const Icon = t.icon;
@@ -607,6 +669,7 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
                     return r;
                   }}
                   onSignOut={() => void onGoogleSignOut()}
+                  onCancelSignIn={onCancelGoogleSignIn}
                   label="গুগল দিয়ে লগইন করুন"
                 />
               )}
@@ -637,13 +700,22 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
                 const parsed = extractSpreadsheetId(sheetInput);
                 const parsedChallan = extractSpreadsheetId(challanSheetInput);
                 const parsedChallanUrl = challanUrlInput.trim();
+                const parsedMainGasUrl = mainGasUrlInput.trim();
                 onUpdateSheetsConfig({
                   spreadsheetId: parsed,
                   challanSpreadsheetId: parsedChallan,
                   challanAppsScriptUrl: parsedChallanUrl,
-                  enabled: Boolean(parsed || parsedChallan || parsedChallanUrl),
+                  appsScriptUrl: parsedMainGasUrl,
+                  enabled: Boolean(
+                    parsed || parsedChallan || parsedChallanUrl || parsedMainGasUrl
+                  ),
                 });
-                const r = await onSyncFromSheet(parsed, parsedChallan, parsedChallanUrl);
+                const r = await onSyncFromSheet(
+                  parsed,
+                  parsedChallan,
+                  parsedChallanUrl,
+                  parsedMainGasUrl
+                );
                 showRes(r);
               }}
               className="space-y-3 rounded-xl border border-slate-200 bg-slate-50/70 p-4"
@@ -720,6 +792,195 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
                 />
               </div>
 
+              <div className="rounded-lg border border-rose-200 bg-rose-50/50 p-3 space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <label className="block text-xs font-bold text-slate-900">
+                    ৪. মূল শিট Save/Push Apps Script Web App URL (গুগল লগইন ছাড়াই স্বয়ংক্রিয়ভাবে শিটে সেভ করতে):
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setShowMainGasCode((v) => !v)}
+                    className="inline-flex items-center gap-1 rounded-lg border border-rose-300 bg-white hover:bg-rose-50 px-2.5 py-1 text-[11px] font-bold text-[#E2136E] cursor-pointer"
+                  >
+                    <FileCode2 className="h-3.5 w-3.5" />
+                    <span>{showMainGasCode ? 'কোড লুকান' : 'Apps Script কোড দেখুন ও কপি করুন'}</span>
+                  </button>
+                </div>
+                <input
+                  type="url"
+                  value={mainGasUrlInput}
+                  onChange={(e) => setMainGasUrlInput(e.target.value)}
+                  placeholder="https://script.google.com/macros/s/.../exec"
+                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs"
+                />
+
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setGasCodeMode('append')}
+                    className={`rounded-md px-2.5 py-1 text-[11px] font-bold border cursor-pointer transition-colors ${
+                      gasCodeMode === 'append'
+                        ? 'bg-[#E2136E] text-white border-[#E2136E]'
+                        : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+                    }`}
+                  >
+                    বিদ্যমান Code.gs-এর শেষে (আগের প্রজেক্ট)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setGasCodeMode('standalone')}
+                    className={`rounded-md px-2.5 py-1 text-[11px] font-bold border cursor-pointer transition-colors ${
+                      gasCodeMode === 'standalone'
+                        ? 'bg-[#E2136E] text-white border-[#E2136E]'
+                        : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+                    }`}
+                  >
+                    নতুন আলাদা প্রজেক্ট
+                  </button>
+                </div>
+
+                {gasCodeMode === 'append' ? (
+                  <div className="rounded-lg border border-emerald-200 bg-emerald-50/70 px-3 py-2 text-[11px] text-emerald-950 space-y-1 leading-relaxed">
+                    <div className="font-bold">
+                      আগের প্রজেক্টেই আপডেট করার নিয়ম (কোনো নতুন প্রজেক্ট লাগবে না, আগের doGet অক্ষত থাকবে):
+                    </div>
+                    <ol className="list-decimal list-inside space-y-0.5">
+                      <li>
+                        এখন থেকে সব ডেটা আপনার ওয়েব অ্যাপের মূল ট্যাবে (<span className="font-mono">Ministry_Allocation, DC_Allocation, UNO_Suballocation, Dealer_Suballocation, GR_Project, Kabikha_Project, DO_Book, DO_Issue, Challan</span> — শেষে বাড়তি <span className="font-mono">s</span> ছাড়া) যাবে এবং আগে তৈরি হওয়া ডুপ্লিকেট <span className="font-mono">...s</span> ট্যাবগুলো সেভের সময় স্বয়ংক্রিয়ভাবে পরিষ্কার হবে।
+                      </li>
+                      <li>
+                        আপনার Google Sheet থেকে <span className="font-semibold">Extensions → Apps Script</span> খুলুন। আপনার মূল ওয়েব অ্যাপের উপরের <span className="font-mono">doGet</span> ও নিজস্ব ফাংশনগুলো একদমই মুছবেন না।
+                      </li>
+                      <li>
+                        আগে যদি এই অ্যাপ থেকে পুরনো <span className="font-mono">syncAllTabsFromApp_</span> বা <span className="font-mono">doPost(e)</span> কোড নিচে বসিয়ে থাকেন, তবে শুধু সেই পুরনো সিঙ্ক ও <span className="font-mono">doPost</span> অংশটুকু মুছে নিচের নতুন কোডটি শেষে পেস্ট করে <span className="font-semibold">Save</span> করুন।
+                      </li>
+                      <li>
+                        উপরে ডানে <span className="font-semibold">Deploy → Manage deployments → Edit (পেন্সিল আইকন) → Version: New version → Deploy</span> চাপুন — এরপর অ্যাপে ফিরে <span className="font-semibold">প্রথমে «লিংক সেভ ও শিট থেকে ডেটা আনুন»</span> চাপুন (প্রাইভেট শিটেও এখন Apps Script দিয়ে ডেটা আসবে; খালি অ্যাপ থেকে Push সুরক্ষার জন্য ব্লক করা আছে)।
+                      </li>
+                    </ol>
+                  </div>
+                ) : (
+                  <div className="rounded-lg border border-slate-200 bg-white/90 px-3 py-2 text-[11px] text-slate-800 space-y-1 leading-relaxed">
+                    <div className="font-bold">
+                      আলাদা Apps Script প্রজেক্টে চালানোর নিয়ম (আগের Web App-এর Code.gs একদম ছুঁতে হবে না):
+                    </div>
+                    <ol className="list-decimal list-inside space-y-0.5">
+                      <li>
+                        উপরে <span className="font-semibold">১ নং বক্সে</span> আপনার Google Sheet লিংক/ID দিন (কোডের{' '}
+                        <span className="font-mono">ALLOC_DEFAULT_SPREADSHEET_ID_</span>-তে অটো বসবে
+                        {extractSpreadsheetId(sheetInput)
+                          ? ` — বর্তমান ID: ${extractSpreadsheetId(sheetInput)}`
+                          : ' — এখনো বক্স ১ খালি'}
+                        )।
+                      </li>
+                      <li>
+                        <a
+                          href="https://script.google.com/home/start"
+                          target="_blank"
+                          rel="noreferrer"
+                          className="font-bold underline text-[#E2136E]"
+                        >
+                          script.google.com
+                        </a>{' '}
+                        ওপেন করে <span className="font-semibold">New Project</span> তৈরি করুন → নিচের কোডটি কপি করে পুরোটা পেস্ট করে Save করুন।
+                      </li>
+                      <li>
+                        <span className="font-semibold">Deploy → New deployment → Web app</span> বেছে{' '}
+                        <span className="font-semibold">Execute as: Me</span> এবং{' '}
+                        <span className="font-semibold">Who has access: Anyone</span> দিয়ে Deploy করুন (প্রথমবার Google Sheet অনুমতি চাইলে{' '}
+                        <span className="font-semibold">Advanced → Go to ... → Allow</span> দিন)।
+                      </li>
+                      <li>
+                        পাওয়া <span className="font-mono">/exec</span> লিংকটি উপরের ৪ নং বক্সে পেস্ট করে নিচে{' '}
+                        <span className="font-semibold">অ্যাপের সকল ডেটা Google Sheet-এ সেভ (Push)</span> চাপুন।
+                      </li>
+                    </ol>
+                  </div>
+                )}
+
+                {showMainGasCode && (
+                  <div className="rounded-lg border border-slate-200 bg-white p-2.5 space-y-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-[11px] font-bold text-slate-800">
+                        {gasCodeMode === 'standalone'
+                          ? 'Standalone Apps Script কোড (আলাদা প্রজেক্টের জন্য — doGet + doPost সহ):'
+                          : 'Apps Script Writeback কোড (বিদ্যমান Code.gs-এর শেষে — doGet ছাড়া):'}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            await navigator.clipboard.writeText(activeMainGasCode);
+                            setCopiedMainGasCode(true);
+                            setTimeout(() => setCopiedMainGasCode(false), 2500);
+                          } catch {
+                            showRes({ ok: false, error: 'ক্লিপবোর্ডে কপি করা যায়নি; ম্যানুয়ালি সিলেক্ট করে কপি করুন।' });
+                          }
+                        }}
+                        className="inline-flex items-center gap-1 rounded-lg bg-[#E2136E] hover:bg-[#B80D58] px-2.5 py-1 text-[11px] font-bold text-white cursor-pointer"
+                      >
+                        <Copy className="h-3 w-3" />
+                        <span>{copiedMainGasCode ? 'কপি হয়েছে!' : 'কোড কপি করুন'}</span>
+                      </button>
+                    </div>
+                    <pre className="max-h-48 overflow-auto rounded-lg bg-slate-900 p-2.5 text-[10px] text-slate-100 font-mono whitespace-pre-wrap break-all">
+                      {activeMainGasCode}
+                    </pre>
+                  </div>
+                )}
+              </div>
+
+              <label className="flex items-center gap-2 text-xs font-semibold text-slate-800 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={sheetsConfig.autoSync !== false}
+                  onChange={(e) => onUpdateSheetsConfig({ autoSync: e.target.checked })}
+                  className="h-4 w-4 rounded border-slate-300 accent-[#E2136E]"
+                />
+                <span>অ্যাপে নতুন এন্ট্রি সেভ করলে স্বয়ংক্রিয়ভাবে Google Sheet-এ সেভ হবে</span>
+              </label>
+
+              {(hasPendingSheetSync ||
+                sheetSyncState === 'needs_auth' ||
+                sheetSyncState === 'needs_write_confirm') && (
+                <div className="rounded-xl border border-amber-300 bg-amber-50 px-3.5 py-2.5 text-xs text-amber-950 flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-bold">
+                    {sheetSyncState === 'needs_auth'
+                      ? 'অ্যাপে নতুন এন্ট্রি আছে — Google Sheet-এ পাঠাতে Google Sign-In করুন অথবা Apps Script URL দিন।'
+                      : sheetSyncState === 'needs_write_confirm'
+                        ? 'স্বয়ংক্রিয়ভাবে শিটে সেভ চালু করতে প্রথমবার ডান পাশের বাটনে ক্লিক করে অনুমতি নিশ্চিত করুন।'
+                        : 'অপেক্ষমাণ এন্ট্রি Google Sheet-এ সেভ হচ্ছে বা পাঠানোর জন্য প্রস্তুত।'}
+                  </span>
+                  {sheetSyncState === 'needs_auth' ? (
+                    <button
+                      type="button"
+                      disabled={isGoogleSigningIn || isSyncingSheets}
+                      onClick={async () => {
+                        const r = await onGoogleSignIn();
+                        showRes(r);
+                      }}
+                      className="rounded-lg bg-[#E2136E] hover:bg-[#B80D58] px-3 py-1.5 text-[11px] font-bold text-white cursor-pointer"
+                    >
+                      সাইন-ইন ও শিটে পাঠান
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={isSyncingSheets}
+                      onClick={async () => {
+                        const parsedMainId = extractSpreadsheetId(sheetInput);
+                        const trimmedGasUrl = mainGasUrlInput.trim();
+                        const r = await onPushToSheet(trimmedGasUrl, parsedMainId);
+                        showRes(r);
+                      }}
+                      className="rounded-lg bg-amber-600 hover:bg-amber-700 px-3 py-1.5 text-[11px] font-bold text-white cursor-pointer"
+                    >
+                      এখনই শিটে সেভ নিশ্চিত করুন
+                    </button>
+                  )}
+                </div>
+              )}
+
               <div className="flex flex-wrap items-center gap-2.5">
                 <button
                   type="submit"
@@ -747,9 +1008,20 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
 
                 <button
                   type="button"
-                  disabled={isSyncingSheets || !hasGoogleToken || !sheetInput.trim()}
+                  disabled={
+                    isSyncingSheets ||
+                    (!hasGoogleToken && !mainGasUrlInput.trim() && !sheetsConfig.appsScriptUrl) ||
+                    (!sheetInput.trim() && !mainGasUrlInput.trim() && !sheetsConfig.appsScriptUrl)
+                  }
                   onClick={async () => {
-                    const r = await onPushToSheet();
+                    const parsedMainId = extractSpreadsheetId(sheetInput);
+                    const trimmedGasUrl = mainGasUrlInput.trim();
+                    onUpdateSheetsConfig({
+                      spreadsheetId: parsedMainId || sheetsConfig.spreadsheetId,
+                      appsScriptUrl: trimmedGasUrl,
+                      enabled: Boolean(parsedMainId || trimmedGasUrl || sheetsConfig.enabled),
+                    });
+                    const r = await onPushToSheet(trimmedGasUrl, parsedMainId);
                     showRes(r);
                   }}
                   className="min-h-[44px] inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 disabled:opacity-40 px-4 py-2 text-xs font-bold text-slate-900 cursor-pointer"
@@ -773,9 +1045,11 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
             </form>
 
             {/* Synced Records Live Summary */}
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 text-xs">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
               {[
                 { label: 'মন্ত্রণালয় বরাদ্দ', val: db.ministryAllocations.length },
+                { label: 'ডিসি বরাদ্দ', val: db.dcAllocations.length },
+                { label: 'প্রকল্প (জিআর/কাবিখা)', val: db.projects.length },
                 { label: 'ডিলার ও ইউএনও উপবরাদ্দ', val: db.dealerSuballocations.length + db.unoSuballocations.length },
                 { label: 'ডিও ইস্যু', val: db.doIssues.length },
                 { label: 'ট্রেজারি চালান', val: db.challans.length },
@@ -873,6 +1147,80 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
                 </div>
               )}
             </div>
+          </div>
+
+          {/* App Source Code Download for Easy Updates */}
+          <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-3">
+            <div>
+              <div className="text-sm font-bold text-slate-900">
+                অ্যাপের সোর্স কোড ডাউনলোড (পরবর্তীতে সহজে আপডেটের জন্য)
+              </div>
+              <p className="text-xs text-slate-600 mt-0.5">
+                অ্যাপটির সম্পূর্ণ কোড (.zip বা ফাইল আকারে) নামিয়ে রাখুন যাতে যেকোনো সময় এডিট, GitHub আপলোড বা নতুন ভার্সন আপডেট করতে পারেন।
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2.5">
+              <button
+                type="button"
+                disabled={sourceZipDownloading}
+                onClick={() => void handleDownloadSourceZip('full')}
+                className="min-h-[44px] inline-flex items-center gap-1.5 rounded-xl bg-[#E2136E] hover:bg-[#B80D58] disabled:opacity-50 px-4 py-2 text-xs font-bold text-white cursor-pointer"
+              >
+                <Download className="h-3.5 w-3.5" />
+                <span>{sourceZipDownloading ? 'তৈরি হচ্ছে...' : 'সম্পূর্ণ সোর্স কোড (.zip)'}</span>
+              </button>
+
+              <button
+                type="button"
+                disabled={sourceZipDownloading}
+                onClick={() => void handleDownloadSourceZip('web')}
+                className="min-h-[44px] inline-flex items-center gap-1.5 rounded-xl border border-emerald-400 bg-emerald-50 hover:bg-emerald-100 disabled:opacity-50 px-3.5 py-2 text-xs font-bold text-emerald-950 cursor-pointer"
+              >
+                <Download className="h-3.5 w-3.5 text-emerald-700" />
+                <span>শুধু ওয়েব সোর্স (.zip)</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setShowSourceModal(true)}
+                className="min-h-[44px] inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 px-3.5 py-2 text-xs font-bold text-slate-800 cursor-pointer"
+              >
+                <FileCode2 className="h-3.5 w-3.5 text-[#E2136E]" />
+                <span>ফাইল দেখুন ও কপি করুন</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => onChangeTab('android')}
+                className="min-h-[44px] inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-slate-50 hover:bg-slate-100 px-3.5 py-2 text-xs font-bold text-slate-800 cursor-pointer"
+              >
+                <FolderGit2 className="h-3.5 w-3.5 text-slate-700" />
+                <span>সোর্স ও APK বিস্তারিত</span>
+              </button>
+            </div>
+            {zipDownloadStatus && (
+              <div
+                className={`rounded-xl border px-3.5 py-2.5 text-xs font-bold flex flex-wrap items-center justify-between gap-2 ${
+                  zipDownloadStatus.ok
+                    ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+                    : 'border-rose-200 bg-rose-50 text-rose-900'
+                }`}
+              >
+                <span>{zipDownloadStatus.text}</span>
+                {zipDownloadStatus.directUrl && (
+                  <a
+                    href={zipDownloadStatus.directUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    download={zipDownloadStatus.fileName || 'khaddo-boraddo-source-code.zip'}
+                    className="inline-flex items-center gap-1 rounded-lg bg-white border border-slate-300 px-2.5 py-1 text-[11px] font-extrabold text-[#E2136E] hover:bg-rose-50"
+                  >
+                    <ExternalLink className="h-3.5 w-3.5" />
+                    <span>নতুন ট্যাবে ডাউনলোড খুলুন</span>
+                  </a>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -1765,15 +2113,22 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
-                  onSaveFoodDealer({
-                    ...newFood,
-                    cardCount: parseNum(newFood.cardCount),
-                    totalQty: 0,
-                    poDate: '',
-                    amount: 0,
-                    supervisorDesignation: '',
-                    supervisorMobile: '',
-                  });
+                  const existing = editingFoodId
+                    ? db.foodDealers.find((x) => x.id === editingFoodId)
+                    : undefined;
+                  onSaveFoodDealer(
+                    {
+                      ...newFood,
+                      cardCount: parseNum(newFood.cardCount),
+                      totalQty: existing?.totalQty || 0,
+                      poDate: existing?.poDate || '',
+                      amount: existing?.amount || 0,
+                      supervisorDesignation: existing?.supervisorDesignation || '',
+                      supervisorMobile: existing?.supervisorMobile || '',
+                    },
+                    editingFoodId || undefined
+                  );
+                  setEditingFoodId(null);
                   setNewFood((p) => ({ ...p, dealerName: '', salesCenter: '', mobile: '' }));
                 }}
                 className="grid grid-cols-2 sm:grid-cols-6 gap-2 bg-slate-50 p-3 rounded-xl border border-slate-200"
@@ -1819,12 +2174,27 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
                   placeholder="কার্ড সংখ্যা"
                   className="rounded border border-slate-300 bg-white px-2.5 py-1.5"
                 />
-                <button
-                  type="submit"
-                  className="inline-flex items-center justify-center gap-1 rounded bg-[#E2136E] hover:bg-[#B80D58] text-white font-bold px-3 py-1.5 cursor-pointer"
-                >
-                  <Plus className="h-3.5 w-3.5" /> যোগ করুন
-                </button>
+                <div className="flex gap-1">
+                  <button
+                    type="submit"
+                    className="flex-1 inline-flex items-center justify-center gap-1 rounded bg-[#E2136E] hover:bg-[#B80D58] text-white font-bold px-3 py-1.5 cursor-pointer"
+                  >
+                    <Plus className="h-3.5 w-3.5" /> {editingFoodId ? 'আপডেট' : 'যোগ করুন'}
+                  </button>
+                  {editingFoodId && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingFoodId(null);
+                        setNewFood((p) => ({ ...p, dealerName: '', salesCenter: '', mobile: '' }));
+                      }}
+                      className="rounded border border-slate-300 bg-white px-2 text-slate-600 cursor-pointer"
+                      title="বাতিল"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </div>
               </form>
 
               <div className="overflow-x-auto">
@@ -1836,12 +2206,12 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
                       <th className="py-2 px-3 text-center">মোবাইল</th>
                       <th className="py-2 px-3 text-center">কার্ড</th>
                       <th className="py-2 px-3 text-right">চাল (মে.টন)</th>
-                      <th className="py-2 px-3 text-center">মুছুন</th>
+                      <th className="py-2 px-3 text-center">কাজ</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {db.foodDealers.map((d) => (
-                      <tr key={d.id}>
+                      <tr key={d.id} className={editingFoodId === d.id ? 'bg-rose-50/50' : ''}>
                         <td className="py-2 px-3">{d.unionName}</td>
                         <td className="py-2 px-3 font-bold">
                           {d.dealerName}{' '}
@@ -1850,14 +2220,42 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
                         <td className="py-2 px-3 text-center">{toBnDigits(d.mobile)}</td>
                         <td className="py-2 px-3 text-center">{formatBnInt(d.cardCount)}</td>
                         <td className="py-2 px-3 text-right font-bold">{formatBnQty(d.totalQty)}</td>
-                        <td className="py-2 px-3 text-center">
-                          <button
-                            type="button"
-                            onClick={() => onDeleteFoodDealer(d.id)}
-                            className="text-rose-600 p-1 cursor-pointer"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
+                        <td className="py-2 px-3 text-center whitespace-nowrap">
+                          <div className="inline-flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditingFoodId(d.id);
+                                setNewFood({
+                                  dealerName: d.dealerName,
+                                  fatherName: d.fatherName,
+                                  nid: d.nid,
+                                  mobile: d.mobile,
+                                  unionName: d.unionName,
+                                  salesCenter: d.salesCenter,
+                                  cardCount: String(d.cardCount),
+                                  bankName: d.bankName || 'সোনালী ব্যাংক পিএলসি',
+                                  poNo: d.poNo || '',
+                                  supervisorName: d.supervisorName || '',
+                                });
+                              }}
+                              className="text-[#E2136E] hover:bg-rose-50 rounded p-1 cursor-pointer"
+                              title="এডিট করুন"
+                            >
+                              <Pencil className="h-3.5 w-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (editingFoodId === d.id) setEditingFoodId(null);
+                                onDeleteFoodDealer(d.id);
+                              }}
+                              className="text-rose-600 hover:bg-rose-50 rounded p-1 cursor-pointer"
+                              title="মুছুন"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -1872,17 +2270,24 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
-                  onSaveOMSDealer({
-                    ...newOms,
-                    fatherName: '',
-                    nid: '',
-                    poNo: '',
-                    poDate: '',
-                    amount: 0,
-                    supervisorName: '',
-                    supervisorDesignation: '',
-                    supervisorMobile: '',
-                  });
+                  const existing = editingOmsId
+                    ? db.omsDealers.find((x) => x.id === editingOmsId)
+                    : undefined;
+                  onSaveOMSDealer(
+                    {
+                      ...newOms,
+                      fatherName: existing?.fatherName || '',
+                      nid: existing?.nid || '',
+                      poNo: existing?.poNo || '',
+                      poDate: existing?.poDate || '',
+                      amount: existing?.amount || 0,
+                      supervisorName: existing?.supervisorName || '',
+                      supervisorDesignation: existing?.supervisorDesignation || '',
+                      supervisorMobile: existing?.supervisorMobile || '',
+                    },
+                    editingOmsId || undefined
+                  );
+                  setEditingOmsId(null);
                   setNewOms((p) => ({ ...p, dealerName: '', salesCenter: '', mobile: '' }));
                 }}
                 className="grid grid-cols-2 sm:grid-cols-6 gap-2 bg-slate-50 p-3 rounded-xl border border-slate-200"
@@ -1947,12 +2352,27 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
                   placeholder="মোবাইল"
                   className="rounded border border-slate-300 bg-white px-2.5 py-1.5"
                 />
-                <button
-                  type="submit"
-                  className="inline-flex items-center justify-center gap-1 rounded bg-[#E2136E] hover:bg-[#B80D58] text-white font-bold px-3 py-1.5 cursor-pointer"
-                >
-                  <Plus className="h-3.5 w-3.5" /> যোগ করুন
-                </button>
+                <div className="flex gap-1">
+                  <button
+                    type="submit"
+                    className="flex-1 inline-flex items-center justify-center gap-1 rounded bg-[#E2136E] hover:bg-[#B80D58] text-white font-bold px-3 py-1.5 cursor-pointer"
+                  >
+                    <Plus className="h-3.5 w-3.5" /> {editingOmsId ? 'আপডেট' : 'যোগ করুন'}
+                  </button>
+                  {editingOmsId && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingOmsId(null);
+                        setNewOms((p) => ({ ...p, dealerName: '', salesCenter: '', mobile: '' }));
+                      }}
+                      className="rounded border border-slate-300 bg-white px-2 text-slate-600 cursor-pointer"
+                      title="বাতিল"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </div>
               </form>
 
               <div className="overflow-x-auto">
@@ -1963,26 +2383,51 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
                       <th className="py-2 px-3 text-left">ডিলারের নাম</th>
                       <th className="py-2 px-3 text-left">বিক্রয় কেন্দ্র</th>
                       <th className="py-2 px-3 text-center">মোবাইল</th>
-                      <th className="py-2 px-3 text-center">মুছুন</th>
+                      <th className="py-2 px-3 text-center">কাজ</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {db.omsDealers.map((d) => (
-                      <tr key={d.id}>
+                      <tr key={d.id} className={editingOmsId === d.id ? 'bg-rose-50/50' : ''}>
                         <td className="py-2 px-3">
                           {d.areaType} ({d.areaType === 'পৌরসভা' ? d.municipality : d.unionName})
                         </td>
                         <td className="py-2 px-3 font-bold">{d.dealerName}</td>
                         <td className="py-2 px-3">{d.salesCenter}</td>
                         <td className="py-2 px-3 text-center">{toBnDigits(d.mobile)}</td>
-                        <td className="py-2 px-3 text-center">
-                          <button
-                            type="button"
-                            onClick={() => onDeleteOMSDealer(d.id)}
-                            className="text-rose-600 p-1 cursor-pointer"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
+                        <td className="py-2 px-3 text-center whitespace-nowrap">
+                          <div className="inline-flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditingOmsId(d.id);
+                                setNewOms({
+                                  dealerName: d.dealerName,
+                                  mobile: d.mobile,
+                                  areaType: d.areaType,
+                                  unionName: d.unionName,
+                                  municipality: d.municipality,
+                                  salesCenter: d.salesCenter,
+                                  bankName: d.bankName || 'সোনালী ব্যাংক পিএলসি',
+                                });
+                              }}
+                              className="text-[#E2136E] hover:bg-rose-50 rounded p-1 cursor-pointer"
+                              title="এডিট করুন"
+                            >
+                              <Pencil className="h-3.5 w-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (editingOmsId === d.id) setEditingOmsId(null);
+                                onDeleteOMSDealer(d.id);
+                              }}
+                              className="text-rose-600 hover:bg-rose-50 rounded p-1 cursor-pointer"
+                              title="মুছুন"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -1997,8 +2442,9 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
-                  onSaveChairman(newChairman);
-                  setNewChairman((p) => ({ ...p, chairmanName: '', mobile: '' }));
+                  onSaveChairman(newChairman, editingChairmanId || undefined);
+                  setEditingChairmanId(null);
+                  setNewChairman((p) => ({ ...p, chairmanName: '', mobile: '', supervisorName: '' }));
                 }}
                 className="grid grid-cols-2 sm:grid-cols-5 gap-2 bg-slate-50 p-3 rounded-xl border border-slate-200"
               >
@@ -2039,12 +2485,27 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
                   placeholder="তদারকি কর্মকর্তা"
                   className="rounded border border-slate-300 bg-white px-2.5 py-1.5"
                 />
-                <button
-                  type="submit"
-                  className="inline-flex items-center justify-center gap-1 rounded bg-[#E2136E] hover:bg-[#B80D58] text-white font-bold px-3 py-1.5 cursor-pointer"
-                >
-                  <Plus className="h-3.5 w-3.5" /> যোগ করুন
-                </button>
+                <div className="flex gap-1">
+                  <button
+                    type="submit"
+                    className="flex-1 inline-flex items-center justify-center gap-1 rounded bg-[#E2136E] hover:bg-[#B80D58] text-white font-bold px-3 py-1.5 cursor-pointer"
+                  >
+                    <Plus className="h-3.5 w-3.5" /> {editingChairmanId ? 'আপডেট' : 'যোগ করুন'}
+                  </button>
+                  {editingChairmanId && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingChairmanId(null);
+                        setNewChairman((p) => ({ ...p, chairmanName: '', mobile: '', supervisorName: '' }));
+                      }}
+                      className="rounded border border-slate-300 bg-white px-2 text-slate-600 cursor-pointer"
+                      title="বাতিল"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </div>
               </form>
 
               <div className="overflow-x-auto">
@@ -2055,24 +2516,47 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
                       <th className="py-2 px-3 text-left">চেয়ারম্যান / প্রাপক</th>
                       <th className="py-2 px-3 text-center">মোবাইল</th>
                       <th className="py-2 px-3 text-left">তদারকি কর্মকর্তা</th>
-                      <th className="py-2 px-3 text-center">মুছুন</th>
+                      <th className="py-2 px-3 text-center">কাজ</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {db.chairmen.map((c) => (
-                      <tr key={c.id}>
+                      <tr key={c.id} className={editingChairmanId === c.id ? 'bg-rose-50/50' : ''}>
                         <td className="py-2 px-3">{c.unionName}</td>
                         <td className="py-2 px-3 font-bold">{c.chairmanName}</td>
                         <td className="py-2 px-3 text-center">{toBnDigits(c.mobile)}</td>
                         <td className="py-2 px-3">{c.supervisorName}</td>
-                        <td className="py-2 px-3 text-center">
-                          <button
-                            type="button"
-                            onClick={() => onDeleteChairman(c.id)}
-                            className="text-rose-600 p-1 cursor-pointer"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
+                        <td className="py-2 px-3 text-center whitespace-nowrap">
+                          <div className="inline-flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditingChairmanId(c.id);
+                                setNewChairman({
+                                  unionName: c.unionName,
+                                  chairmanName: c.chairmanName,
+                                  mobile: c.mobile,
+                                  supervisorName: c.supervisorName,
+                                  supervisorMobile: c.supervisorMobile,
+                                });
+                              }}
+                              className="text-[#E2136E] hover:bg-rose-50 rounded p-1 cursor-pointer"
+                              title="এডিট করুন"
+                            >
+                              <Pencil className="h-3.5 w-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (editingChairmanId === c.id) setEditingChairmanId(null);
+                                onDeleteChairman(c.id);
+                              }}
+                              className="text-rose-600 hover:bg-rose-50 rounded p-1 cursor-pointer"
+                              title="মুছুন"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -2087,12 +2571,16 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
-                  onSaveFireService({
-                    officeName: newFire.officeName,
-                    divisionName: newFire.divisionName,
-                    riceRate: parseNum(newFire.riceRate),
-                    wheatRate: parseNum(newFire.wheatRate),
-                  });
+                  onSaveFireService(
+                    {
+                      officeName: newFire.officeName,
+                      divisionName: newFire.divisionName,
+                      riceRate: parseNum(newFire.riceRate),
+                      wheatRate: parseNum(newFire.wheatRate),
+                    },
+                    editingFireId || undefined
+                  );
+                  setEditingFireId(null);
                   setNewFire((p) => ({ ...p, officeName: '' }));
                 }}
                 className="grid grid-cols-2 sm:grid-cols-5 gap-2 bg-slate-50 p-3 rounded-xl border border-slate-200"
@@ -2124,12 +2612,27 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
                   placeholder="গম দর"
                   className="rounded border border-slate-300 bg-white px-2.5 py-1.5"
                 />
-                <button
-                  type="submit"
-                  className="inline-flex items-center justify-center gap-1 rounded bg-[#E2136E] hover:bg-[#B80D58] text-white font-bold px-3 py-1.5 cursor-pointer"
-                >
-                  <Plus className="h-3.5 w-3.5" /> যোগ করুন
-                </button>
+                <div className="flex gap-1">
+                  <button
+                    type="submit"
+                    className="flex-1 inline-flex items-center justify-center gap-1 rounded bg-[#E2136E] hover:bg-[#B80D58] text-white font-bold px-3 py-1.5 cursor-pointer"
+                  >
+                    <Plus className="h-3.5 w-3.5" /> {editingFireId ? 'আপডেট' : 'যোগ করুন'}
+                  </button>
+                  {editingFireId && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingFireId(null);
+                        setNewFire((p) => ({ ...p, officeName: '' }));
+                      }}
+                      className="rounded border border-slate-300 bg-white px-2 text-slate-600 cursor-pointer"
+                      title="বাতিল"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </div>
               </form>
 
               <table className="w-full border-collapse tabular-nums">
@@ -2139,24 +2642,46 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
                     <th className="py-2 px-3 text-left">বিভাগ</th>
                     <th className="py-2 px-3 text-right">চাল দর (৳/মে.টন)</th>
                     <th className="py-2 px-3 text-right">গম দর (৳/মে.টন)</th>
-                    <th className="py-2 px-3 text-center">মুছুন</th>
+                    <th className="py-2 px-3 text-center">কাজ</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {db.fireServices.map((f) => (
-                    <tr key={f.id}>
+                    <tr key={f.id} className={editingFireId === f.id ? 'bg-rose-50/50' : ''}>
                       <td className="py-2 px-3 font-bold">{f.officeName}</td>
                       <td className="py-2 px-3">{f.divisionName}</td>
                       <td className="py-2 px-3 text-right">{formatBnMoney(f.riceRate)}</td>
                       <td className="py-2 px-3 text-right">{formatBnMoney(f.wheatRate)}</td>
-                      <td className="py-2 px-3 text-center">
-                        <button
-                          type="button"
-                          onClick={() => onDeleteFireService(f.id)}
-                          className="text-rose-600 p-1 cursor-pointer"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
+                      <td className="py-2 px-3 text-center whitespace-nowrap">
+                        <div className="inline-flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditingFireId(f.id);
+                              setNewFire({
+                                officeName: f.officeName,
+                                divisionName: f.divisionName,
+                                riceRate: String(f.riceRate),
+                                wheatRate: String(f.wheatRate),
+                              });
+                            }}
+                            className="text-[#E2136E] hover:bg-rose-50 rounded p-1 cursor-pointer"
+                            title="এডিট করুন"
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (editingFireId === f.id) setEditingFireId(null);
+                              onDeleteFireService(f.id);
+                            }}
+                            className="text-rose-600 hover:bg-rose-50 rounded p-1 cursor-pointer"
+                            title="মুছুন"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -2244,8 +2769,9 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
         const inIframe = isInEmbeddedIframe();
         const currentOrigin = typeof window !== 'undefined' ? window.location.origin : '';
         const serverBase = apiBaseOrigin || currentOrigin;
-        const directSourceZipUrl = `${apiBaseOrigin}/api/download-source-zip`;
-        const fullSourceZipUrl = `${serverBase}/api/download-source-zip`;
+        const directSourceZipUrl = `${apiBaseOrigin}/api/download-source-zip?scope=full`;
+        const directWebZipUrl = `${apiBaseOrigin}/api/download-source-zip?scope=web`;
+        const fullSourceZipUrl = `${serverBase}/api/download-source-zip?scope=full`;
         const directAndroidZipUrl = `${apiBaseOrigin}/api/build-android-project?appName=${encodeURIComponent(
           apkAppName.trim() || DEFAULT_ANDROID_CONFIG.appName
         )}&packageName=${encodeURIComponent(
@@ -2295,10 +2821,10 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
         <div className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-5 space-y-4 text-xs">
           <div>
             <h3 className="text-base font-bold text-slate-900">
-              সম্পূর্ণ অ্যান্ড্রয়েড অ্যাপ (APK) ও সোর্স কোড
+              সম্পূর্ণ অ্যাপ সোর্স কোড ও অ্যান্ড্রয়েড APK
             </h3>
             <p className="text-slate-600 mt-0.5">
-              এই অ্যাপটি অফলাইন WebView + প্রিন্ট ব্রিজ + Google Sign-In ব্রিজসহ সরাসরি GitHub Actions বা Android Studio দিয়ে APK বিল্ড করার জন্য প্রস্তুত। আপনার সংযুক্ত Google Sheet ID, টেমপ্লেট ও স্বাক্ষর স্বয়ংক্রিয়ভাবে APK-এর ভিতরে যুক্ত হবে।
+              সহজে অ্যাপ আপডেট করার জন্য সম্পূর্ণ সোর্স কোড (.zip), শুধু ওয়েব সোর্স (.zip) অথবা GitHub Actions-সহ Android APK প্রজেক্ট ডাউনলোড করতে পারেন। আপনার সংযুক্ত Google Sheet ID, টেমপ্লেট ও স্বাক্ষর স্বয়ংক্রিয়ভাবে APK-এর ভিতরে যুক্ত হবে।
             </p>
           </div>
 
@@ -2360,6 +2886,26 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
           </div>
 
           <div className="flex flex-wrap gap-2.5">
+            <button
+              type="button"
+              disabled={sourceZipDownloading}
+              onClick={() => void handleDownloadSourceZip('full')}
+              className="min-h-[44px] inline-flex items-center gap-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 px-4 py-2 font-bold text-white cursor-pointer"
+            >
+              <Download className="h-4 w-4" />
+              <span>{sourceZipDownloading ? 'তৈরি হচ্ছে...' : 'সম্পূর্ণ সোর্স কোড (.zip)'}</span>
+            </button>
+
+            <button
+              type="button"
+              disabled={sourceZipDownloading}
+              onClick={() => void handleDownloadSourceZip('web')}
+              className="min-h-[44px] inline-flex items-center gap-1.5 rounded-xl border border-emerald-400 bg-emerald-50 hover:bg-emerald-100 disabled:opacity-50 px-4 py-2 font-bold text-emerald-950 cursor-pointer"
+            >
+              <Download className="h-4 w-4 text-emerald-700" />
+              <span>শুধু ওয়েব সোর্স (.zip)</span>
+            </button>
+
             {inIframe ? (
               <a
                 href={directAndroidZipUrl}
@@ -2390,46 +2936,36 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
               </button>
             )}
 
-            <a
-              href={directSourceZipUrl}
-              target={inIframe ? '_blank' : undefined}
-              rel={inIframe ? 'noopener noreferrer' : undefined}
-              download={inIframe ? undefined : 'khaddo-boraddo-source-code.zip'}
-              onClick={() =>
-                setZipDownloadStatus({
-                  ok: true,
-                  text: inIframe
-                    ? 'নতুন ট্যাবে সোর্স কোড ZIP ডাউনলোড খোলা হয়েছে। Chrome-এ ফাইল সেভ না হলে উপরের «Chrome-এ নতুন ট্যাবে অ্যাপ খুলুন» অথবা «সোর্স ZIP লিংক কপি» ব্যবহার করুন।'
-                    : 'Chrome ডাউনলোড ম্যানেজারে ফাইলটি নামা শুরু হয়েছে — ডাউনলোড শেষে আপনার ফোনের/পিসির Files / Downloads ফোল্ডারে পাবেন।',
-                  directUrl: directSourceZipUrl,
-                  fileName: 'khaddo-boraddo-source-code.zip',
-                })
-              }
-              className="min-h-[44px] inline-flex items-center gap-1.5 rounded-xl border border-emerald-400 bg-emerald-50 hover:bg-emerald-100 px-4 py-2 font-bold text-emerald-950"
-            >
-              <Download className="h-4 w-4 text-emerald-700" />
-              <span>সম্পূর্ণ সোর্স কোড (.zip)</span>
-            </a>
-
             <button
               type="button"
               onClick={() => setShowSourceModal(true)}
               className="min-h-[44px] inline-flex items-center gap-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 px-4 py-2 font-bold text-white cursor-pointer"
             >
               <FileCode2 className="h-4 w-4 text-rose-400" />
-              <span>সব সোর্স কোড কপি করুন</span>
+              <span>সব ফাইল দেখুন ও কপি করুন</span>
             </button>
 
-            {!inIframe && (
-              <button
-                type="button"
-                disabled={sourceZipDownloading}
-                onClick={() => void handleDownloadSourceZip()}
-                className="min-h-[44px] inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 px-4 py-2 font-bold text-slate-900 cursor-pointer"
-              >
-                <Download className="h-4 w-4 text-[#E2136E]" />
-                <span>{sourceZipDownloading ? 'ডাউনলোড হচ্ছে...' : 'বিকল্প ZIP ডাউনলোড'}</span>
-              </button>
+            {inIframe && (
+              <>
+                <a
+                  href={directSourceZipUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="min-h-[44px] inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 px-3.5 py-2 font-bold text-slate-900"
+                >
+                  <ExternalLink className="h-4 w-4 text-[#E2136E]" />
+                  <span>নতুন ট্যাবে সম্পূর্ণ ZIP</span>
+                </a>
+                <a
+                  href={directWebZipUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="min-h-[44px] inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 px-3.5 py-2 font-bold text-slate-900"
+                >
+                  <ExternalLink className="h-4 w-4 text-emerald-700" />
+                  <span>নতুন ট্যাবে ওয়েব ZIP</span>
+                </a>
+              </>
             )}
 
             {isAndroidWebViewOrigin() && hasOpenExternalBrowserBridge() && (
@@ -2501,3 +3037,4 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
     </div>
   );
 };
+

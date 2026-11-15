@@ -117,6 +117,11 @@ function packageWebSourceIntoZip(zip: JSZip, baseDir: string, prefix = '') {
     'server.ts',
     'metadata.json',
     'firebase-applet-config.json',
+    'firestore.rules',
+    'firebase-blueprint.json',
+    'README.md',
+    'bun.lock',
+    'package-lock.json',
     '.env.example',
     '.gitignore',
   ];
@@ -539,11 +544,14 @@ async function startServer() {
       const trimmed = text.trim();
 
       if (!trimmed || trimmed.startsWith('<')) {
+        const isLoginRedirect =
+          trimmed.includes('accounts.google.com') || trimmed.includes('ServiceLogin');
         res.json({
           ok: false,
           code: 'HTML_NOT_JSON',
-          error:
-            'মেইন ওয়েব অ্যাপটি এখনো HTML মোডে রয়েছে। সরাসরি লাইভ সিঙ্কের জন্য Code.gs-এ JSON ব্রিজ কোড যুক্ত করুন।',
+          error: isLoginRedirect
+            ? 'Apps Script Web App-এ "Who has access: Anyone" দেওয়া নেই। Apps Script-এ Deploy → Manage deployments থেকে Anyone নির্বাচন করে New version ডিপ্লয় করুন।'
+            : 'Apps Script Web App থেকে JSON-এর বদলে HTML এসেছে। Deploy → Manage deployments → Version: New version দিয়ে নতুন কোড ডিপ্লয় করুন এবং ৪ নম্বর ঘরে /exec লিংক দিন।',
         });
         return;
       }
@@ -835,6 +843,7 @@ async function startServer() {
       '.gitignore',
       '.yml',
       '.yaml',
+      '.rules',
     ]);
 
     const walkDir = (sourceDir: string, prefix: string, category: string) => {
@@ -875,6 +884,9 @@ async function startServer() {
       'server.ts',
       'metadata.json',
       'firebase-applet-config.json',
+      'firestore.rules',
+      'firebase-blueprint.json',
+      'README.md',
       '.env.example',
       '.gitignore',
     ];
@@ -1025,19 +1037,56 @@ async function startServer() {
     }
   });
 
-  app.get('/api/download-source-zip', async (_req, res) => {
+  app.get('/api/download-source-zip', async (req, res) => {
     try {
+      const scope = req.query.scope === 'web' ? 'web' : 'full';
       const zip = new JSZip();
       const distDir = path.join(__dirname, 'dist');
       const hasDist = fs.existsSync(path.join(distDir, 'index.html'));
       const config: AndroidAppConfig = {
         ...DEFAULT_ANDROID_CONFIG,
+        ...(typeof req.query.appName === 'string' && req.query.appName.trim()
+          ? { appName: req.query.appName.trim() }
+          : {}),
+        ...(typeof req.query.packageName === 'string' && req.query.packageName.trim()
+          ? { packageName: req.query.packageName.trim() }
+          : {}),
         bundleOfflineAssets: hasDist,
       };
 
       packageWebSourceIntoZip(zip, __dirname, '');
-      packageAndroidProjectIntoZip(zip, 'android', config, distDir, hasDist);
-      zip.file('.github/workflows/build-apk.yml', generateGitHubActionsWorkflow(config));
+      if (scope === 'full') {
+        packageAndroidProjectIntoZip(zip, 'android', config, distDir, hasDist);
+        zip.file('.github/workflows/build-apk.yml', generateGitHubActionsWorkflow(config));
+      }
+
+      if (!fs.existsSync(path.join(__dirname, 'README.md'))) {
+        zip.file(
+          'UPDATE_GUIDE.md',
+          [
+            '# খাদ্যশস্য বরাদ্দ ও বিতরণ ব্যবস্থাপনা — Source Code & Update Guide',
+            '',
+            '## ১. লোকাল কম্পিউটার বা সার্ভারে চালানো / আপডেট করা',
+            '1. Node.js 20+ ইনস্টল করুন।',
+            '2. Unzip করা ফোল্ডারে টার্মিনাল খুলুন এবং রান করুন:',
+            '   ```bash',
+            '   npm install',
+            '   npm run dev',
+            '   ```',
+            '3. কোড আপডেট করার পর প্রোডাকশন বিল্ড তৈরি করতে:',
+            '   ```bash',
+            '   npm run build',
+            '   npm start',
+            '   ```',
+            '',
+            '## ২. GitHub থেকে সহজে আপডেট ও অটো APK বিল্ড',
+            '1. এই ZIP ফাইলটি আগে Unzip করুন (সরাসরি .zip আপলোড করবেন না)।',
+            '2. Unzip করা সকল ফাইল ও ফোল্ডার (`src/`, `public/`, `server/`, `.github/`, `package.json`, `server.ts`, `android/`) GitHub রিপোজিটরিতে আপলোড করুন।',
+            '3. পরবর্তীতে GitHub-এ যেকোনো ফাইল এডিট করে Commit করলেই `.github/workflows/build-apk.yml` স্বয়ংক্রিয়ভাবে নতুন Web + APK বিল্ড করবে।',
+            '',
+          ].join('\n')
+        );
+      }
 
       const buffer = await zip.generateAsync({
         type: 'nodebuffer',
@@ -1045,12 +1094,14 @@ async function startServer() {
         compressionOptions: { level: 6 },
       });
 
+      const fileName =
+        scope === 'web'
+          ? 'khaddo-boraddo-web-source.zip'
+          : 'khaddo-boraddo-source-code.zip';
+
       res.setHeader('Content-Type', 'application/zip');
       res.setHeader('Cache-Control', 'no-store');
-      res.setHeader(
-        'Content-Disposition',
-        'attachment; filename="khaddo-boraddo-source-code.zip"'
-      );
+      res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
       res.send(buffer);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to package source code';
@@ -1089,3 +1140,4 @@ async function startServer() {
 }
 
 startServer();
+

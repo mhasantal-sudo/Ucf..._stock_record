@@ -872,7 +872,7 @@ jobs:
           fi
           if [ -n "$WEB_DIR" ]; then
             echo "Building latest web assets from $WEB_DIR..."
-            (cd "$WEB_DIR" && npm install && npm run build)
+            (cd "$WEB_DIR" && npm install --legacy-peer-deps && npm run build)
             if [ -f "app/src/main/assets/web-seed.json" ]; then
               cp "app/src/main/assets/web-seed.json" /tmp/web-seed.json
             fi
@@ -927,3 +927,4 @@ export function generateProjectReadme(config: AndroidAppConfig): string {
 4. রিপোজিটরির **Actions** ট্যাবে গিয়ে **Build Android APK** বিল্ড শেষ হলে **Artifacts** থেকে \`app-debug.apk\` ডাউনলোড করে ইনস্টল করুন।
 `;
 }
+

@@ -171,7 +171,7 @@ function computeSliceRowSpans(
         for (let p = 0; p <= col; p++) {
           const prevV = rows[start + i]?.groupValues?.[p] ?? '';
           const curV = rows[start + j]?.groupValues?.[p] ?? '';
-          if (prevV !== curV) {
+          if (!prevV || prevV === '—' || !curV || curV === '—' || prevV !== curV) {
             sameAllParents = false;
             break;
           }
@@ -431,22 +431,31 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
       const rowEls = Array.from(root.querySelectorAll('[data-measure-row]')) as HTMLElement[];
       const mergedEls = Array.from(root.querySelectorAll('[data-measure-merged]')) as HTMLElement[];
 
-      const docHeaderH = docHeaderEl ? Math.ceil(docHeaderEl.getBoundingClientRect().height) : 0;
-      const contHeaderH = contHeaderEl ? Math.ceil(contHeaderEl.getBoundingClientRect().height) : 26;
-      const pageFooterH = pageFooterEl ? Math.ceil(pageFooterEl.getBoundingClientRect().height) : 26;
+      const outerHeight = (el: HTMLElement | null, fallback = 0): number => {
+        if (!el) return fallback;
+        const rect = el.getBoundingClientRect();
+        const cs = window.getComputedStyle(el);
+        const mt = parseFloat(cs.marginTop || '0') || 0;
+        const mb = parseFloat(cs.marginBottom || '0') || 0;
+        return Math.ceil(rect.height + mt + mb);
+      };
+
+      const docHeaderH = outerHeight(docHeaderEl, 0);
+      const contHeaderH = outerHeight(contHeaderEl, 28);
+      const pageFooterH = outerHeight(pageFooterEl, 26);
       const effectiveMaxBodyH = Math.max(
-        200,
-        pageHeightPx - padTopPx - padBottomPx - pageFooterH - 4
+        180,
+        pageHeightPx - padTopPx - padBottomPx - pageFooterH - 26
       );
-      const theadH = theadEl ? Math.ceil(theadEl.getBoundingClientRect().height) + 1 : 34;
-      const totalH = totalEl ? Math.ceil(totalEl.getBoundingClientRect().height) + 1 : 0;
-      const secondaryH = secondaryEl ? Math.ceil(secondaryEl.getBoundingClientRect().height) : 0;
-      const footerH = footerEl ? Math.ceil(footerEl.getBoundingClientRect().height) : 0;
+      const theadH = theadEl ? Math.ceil(theadEl.getBoundingClientRect().height) + 2 : 36;
+      const totalH = totalEl ? Math.ceil(totalEl.getBoundingClientRect().height) + 2 : 0;
+      const secondaryH = outerHeight(secondaryEl, 0);
+      const footerH = outerHeight(footerEl, 0);
 
       const leafRowHeights = rows.map((_, i) => {
         const el = rowEls[i];
         if (!el) return 24;
-        return Math.ceil(el.getBoundingClientRect().height);
+        return Math.ceil(el.getBoundingClientRect().height) + 1;
       });
 
       const mergedHeightMap = new Map<string, number>();
@@ -476,7 +485,7 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
                 for (let p = 0; p <= col; p++) {
                   const prevV = rows[start + i]?.groupValues?.[p] ?? '';
                   const curV = rows[start + j]?.groupValues?.[p] ?? '';
-                  if (prevV !== curV) {
+                  if (!prevV || prevV === '—' || !curV || curV === '—' || prevV !== curV) {
                     sameAllParents = false;
                     break;
                   }
@@ -719,7 +728,7 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
                   overflow-wrap: break-word !important;
                   word-break: normal !important;
                   letter-spacing: 0 !important;
-                  line-height: 1.42 !important;
+                  line-height: 1.38 !important;
                 }
               `;
               clonedDoc.head.appendChild(fixStyle);
@@ -758,7 +767,7 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
     );
 
     const renderHeaderBlock = () => (
-      <div data-measure="doc-header" className="text-slate-950 font-nikosh">
+      <div data-measure="doc-header" style={{ display: 'flow-root' }} className="text-slate-950 font-nikosh">
         <div className="text-center leading-snug mb-2">
           {template.govLine && (
             <div style={{ fontSize: `${fontPt + 0.5}pt` }} className="font-bold">
@@ -1422,15 +1431,23 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
                       style={{
                         whiteSpace: 'pre-line',
                         ...(leaf.isSignature
-                          ? { minWidth: isLandscape ? '76px' : '56px', height: '30px' }
+                          ? {
+                              minWidth: `${Math.max(isLandscape ? 76 : 56, Math.round(sigHeight * 2.8))}px`,
+                            }
                           : {}),
                       }}
                     >
-                      {leafIdx < effectiveMergeDepth
-                        ? ' '
-                        : leaf.isSignature
-                          ? ' '
-                          : toBnDigits(row.cells[leaf.key] ?? '—')}
+                      {leafIdx < effectiveMergeDepth ? (
+                        ' '
+                      ) : leaf.isSignature ? (
+                        row.hasSignature && template.showSignature && sigSrc ? (
+                          <div style={{ height: `${sigHeight + 4}px` }} />
+                        ) : (
+                          ' '
+                        )
+                      ) : (
+                        toBnDigits(row.cells[leaf.key] ?? '—')
+                      )}
                     </td>
                   ))}
                 </tr>
@@ -1522,7 +1539,7 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
                   boxSizing: 'border-box',
                 }}
               >
-                <div className="min-h-0 flex-1 overflow-hidden">
+                <div className="min-h-0 flex-1 overflow-hidden pb-2">
                   {slice.hasDocHeader ? (
                     renderHeaderBlock()
                   ) : (
@@ -1551,7 +1568,7 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
 
                 <div
                   style={{ fontSize: `${Math.max(7.5, fontPt - 1.5)}pt` }}
-                  className="pt-1.5 border-t border-slate-200 flex justify-between items-center text-slate-500 shrink-0"
+                  className="pt-1.5 border-t border-slate-200 flex justify-between items-center text-slate-500 shrink-0 bg-white"
                 >
                   <span>{toBnDigits(template.office1)}, {toBnDigits(template.office2)}</span>
                   <span className="font-semibold text-slate-700">
@@ -1568,3 +1585,4 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
 );
 
 OfficialA4Document.displayName = 'OfficialA4Document';
+

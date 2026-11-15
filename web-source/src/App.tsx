@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   ClipboardCheck,
   Clock,
+  CloudUpload,
   Eye,
   FileSpreadsheet,
   FileText,
@@ -48,6 +49,7 @@ import { PWAInstallButton } from './components/PWAInstallButton';
 import { PendingProjectsWorkspace } from './components/PendingProjectsWorkspace';
 import { RegistersView } from './components/RegistersView';
 import { ReportsView, type ReportSectionId } from './components/ReportsView';
+import { SheetWriteConfirmModal } from './components/SheetWriteConfirmModal';
 
 type MainSection = 'entry' | 'do' | 'registers' | 'reports' | 'settings';
 type TopStageKey = EntryStageKey | 'do';
@@ -420,6 +422,17 @@ function MainApplication() {
   };
 
   const handleQuickRefresh = async () => {
+    if (store.hasPendingSheetSync) {
+      const res =
+        store.sheetSyncState === 'needs_auth'
+          ? await store.handleGoogleSignIn()
+          : store.sheetSyncState === 'needs_write_confirm'
+            ? await store.requestPushToGoogleSheet()
+            : await store.pushToGoogleSheet();
+      setSyncNotice(res.ok ? res.message || 'শিটে সেভ হয়েছে।' : res.error || 'সেভ হয়নি।');
+      window.setTimeout(() => setSyncNotice(null), 3500);
+      return;
+    }
     const res = await store.syncFromGoogleSheet();
     setSyncNotice(res.ok ? res.message || 'সিঙ্ক সম্পন্ন হয়েছে।' : res.error || 'সিঙ্ক হয়নি।');
     window.setTimeout(() => setSyncNotice(null), 3200);
@@ -628,11 +641,58 @@ function MainApplication() {
             </div>
           </div>
 
-          {/* Mobile PWA Install Pill + Optional Sync Toast */}
-          <div className="mt-2.5 flex items-center justify-between gap-2">
+          {/* Mobile PWA Install Pill + Live Sheet Sync Status & Optional Sync Toast */}
+          <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2">
             <div className="sm:hidden">
               <PWAInstallButton />
             </div>
+
+            {store.sheetSyncState !== 'unlinked' && (
+              <div className="flex items-center gap-1.5">
+                {store.sheetSyncState === 'syncing' ? (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-white/20 px-2.5 py-1 text-[11px] font-bold text-white">
+                    <RefreshCw className="h-3 w-3 animate-spin" />
+                    <span>শিটে সেভ হচ্ছে...</span>
+                  </span>
+                ) : store.sheetSyncState === 'needs_auth' ? (
+                  <button
+                    type="button"
+                    onClick={() => void handleQuickRefresh()}
+                    className="inline-flex items-center gap-1 rounded-full bg-amber-300 hover:bg-amber-200 px-3 py-1 text-[11px] font-bold text-slate-900 shadow-xs cursor-pointer"
+                  >
+                    <CloudUpload className="h-3 w-3" />
+                    <span>নতুন এন্ট্রি শিটে পাঠান (সাইন-ইন)</span>
+                  </button>
+                ) : store.sheetSyncState === 'needs_write_confirm' ||
+                  store.sheetSyncState === 'pending_push' ? (
+                  <button
+                    type="button"
+                    onClick={() => void handleQuickRefresh()}
+                    className="inline-flex items-center gap-1 rounded-full bg-amber-300 hover:bg-amber-200 px-3 py-1 text-[11px] font-bold text-slate-900 shadow-xs cursor-pointer"
+                  >
+                    <CloudUpload className="h-3 w-3" />
+                    <span>অপেক্ষমাণ এন্ট্রি শিটে সেভ করুন</span>
+                  </button>
+                ) : store.sheetSyncState === 'error' ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSettingsTab('sheets');
+                      setSection('settings');
+                    }}
+                    className="inline-flex items-center gap-1 rounded-full bg-white/90 hover:bg-white px-2.5 py-1 text-[11px] font-bold text-rose-800 cursor-pointer"
+                  >
+                    <span>শিট সিঙ্ক ত্রুটি · দেখুন</span>
+                  </button>
+                ) : (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-emerald-400/20 border border-emerald-200/35 px-2.5 py-1 text-[11px] font-bold text-white">
+                    <CheckCircle2 className="h-3 w-3 text-emerald-200" />
+                    <span>Google Sheet সিঙ্কড</span>
+                  </span>
+                )}
+              </div>
+            )}
+
             {syncNotice && (
               <div className="ml-auto rounded-full bg-white/20 backdrop-blur-sm px-3 py-1 text-[11px] font-bold text-white">
                 {syncNotice}
@@ -677,6 +737,85 @@ function MainApplication() {
       {/* Main White Curved Canvas */}
       <main className="app-print-shell relative z-10 -mt-5 max-w-6xl mx-auto px-0 sm:px-4">
         <div className="app-print-canvas bg-white rounded-t-3xl sm:rounded-3xl shadow-[0_-6px_24px_rgba(226,19,110,0.08)] border border-rose-100/80 min-h-[calc(100vh-150px)] p-4 sm:p-6">
+          {(store.sheetSyncState === 'needs_write_confirm' ||
+            store.sheetSyncState === 'needs_auth' ||
+            store.sheetSyncState === 'error') &&
+            section !== 'settings' && (
+              <div
+                className={`no-print mb-4 rounded-2xl border px-3.5 py-2.5 text-xs flex flex-wrap items-center justify-between gap-2 ${
+                  store.sheetSyncState === 'error'
+                    ? 'border-rose-300 bg-rose-50 text-rose-950'
+                    : 'border-amber-300 bg-amber-50 text-amber-950'
+                }`}
+              >
+                <div className="font-bold leading-snug">
+                  {store.sheetSyncState === 'needs_write_confirm'
+                    ? 'আপনার নতুন এন্ট্রি এখনো Google Sheet-এ যায়নি — প্রথমবার ডান পাশের বাটনে ক্লিক করে সেভ নিশ্চিত করুন (এরপর থেকে সব এন্ট্রি স্বয়ংক্রিয়ভাবে লাইভ সেভ হবে)।'
+                    : store.sheetSyncState === 'needs_auth'
+                      ? 'আপনার নতুন এন্ট্রি Google Sheet-এ পাঠাতে Google সাইন-ইন করুন অথবা সেটিংসের ৪ নম্বর ঘরে Apps Script Web App URL (/exec) সেভ করুন।'
+                      : store.sheetsConfig.lastSyncMessage ||
+                        'Google Sheet-এ সেভ করা যায়নি — সেটিংস থেকে Apps Script URL ও ডিপ্লয়মেন্ট যাচাই করুন।'}
+                </div>
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  {store.sheetSyncState === 'needs_auth' ? (
+                    <>
+                      <button
+                        type="button"
+                        disabled={store.isGoogleSigningIn}
+                        onClick={() => void store.handleGoogleSignIn()}
+                        className="rounded-xl bg-[#E2136E] hover:bg-[#B80D58] px-3 py-1.5 text-[11px] font-bold text-white cursor-pointer"
+                      >
+                        সাইন-ইন ও শিটে পাঠান
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSettingsTab('sheets');
+                          setSection('settings');
+                        }}
+                        className="rounded-xl border border-amber-400 bg-white hover:bg-amber-100 px-3 py-1.5 text-[11px] font-bold text-amber-950 cursor-pointer"
+                      >
+                        সেটিংস (৪ নং ঘর)
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        disabled={store.isSyncingSheets}
+                        onClick={() =>
+                          void (store.sheetSyncState === 'needs_write_confirm'
+                            ? store.requestPushToGoogleSheet()
+                            : store.pushToGoogleSheet())
+                        }
+                        className={`rounded-xl px-3 py-1.5 text-[11px] font-bold text-white cursor-pointer ${
+                          store.sheetSyncState === 'error'
+                            ? 'bg-rose-700 hover:bg-rose-800'
+                            : 'bg-amber-600 hover:bg-amber-700'
+                        }`}
+                      >
+                        {store.sheetSyncState === 'error'
+                          ? 'আবার শিটে পাঠান'
+                          : 'এখনই Google Sheet-এ সেভ করুন'}
+                      </button>
+                      {store.sheetSyncState === 'error' && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSettingsTab('sheets');
+                            setSection('settings');
+                          }}
+                          className="rounded-xl border border-rose-300 bg-white hover:bg-rose-100 px-3 py-1.5 text-[11px] font-bold text-rose-900 cursor-pointer"
+                        >
+                          সেটিংস দেখুন
+                        </button>
+                      )}
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+
           {/* SECTION 1: বরাদ্দ এন্ট্রি */}
           {section === 'entry' && (
             <>
@@ -692,6 +831,8 @@ function MainApplication() {
                   onUpdateUNOSub={store.updateUNOSuballocation}
                   onDeleteUNOSub={store.deleteUNOSuballocation}
                   onTransferProject={store.transferProject}
+                  onUpdateProject={store.updateProject}
+                  onDeleteProject={store.deleteProject}
                   onOpenUnoOtherCategory={(cat) => {
                     setShowPendingWorkspace(false);
                     setLockedEntryStage('uno');
@@ -730,6 +871,7 @@ function MainApplication() {
                   onUpdateUNOSub={store.updateUNOSuballocation}
                   onDeleteUNOSub={store.deleteUNOSuballocation}
                   onSaveDOBook={store.saveDOBook}
+                  onUpdateDOBook={store.updateDOBook}
                   onDeleteDOBook={store.deleteDOBook}
                   verifyChallan={store.verifyChallanForRecipient}
                   onIssueDOBatch={store.issueDOBatch}
@@ -751,6 +893,7 @@ function MainApplication() {
                   onLockProjectEntry={() => setIsProjectUnlocked(false)}
                   onUpdateOfficer={store.updateOfficerProfile}
                   onTransferProject={store.transferProject}
+                  onUpdateProject={store.updateProject}
                   onDeleteProject={store.deleteProject}
                   onOpenPendingProjectsWorkspace={handleOpenPendingWorkspace}
                 />
@@ -1096,6 +1239,7 @@ function MainApplication() {
               lockedCategory={doLockedCategory}
               onBack={() => handleSwitchSection('entry')}
               onSaveDOBook={store.saveDOBook}
+              onUpdateDOBook={store.updateDOBook}
               onDeleteDOBook={store.deleteDOBook}
               verifyChallan={store.verifyChallanForRecipient}
               onIssueDOBatch={store.issueDOBatch}
@@ -1148,12 +1292,17 @@ function MainApplication() {
               isGoogleSigningIn={store.isGoogleSigningIn}
               googleAuthError={store.googleAuthError}
               isSyncingSheets={store.isSyncingSheets}
+              hasPendingSheetSync={store.hasPendingSheetSync}
+              sheetSyncState={store.sheetSyncState}
               driveFiles={store.driveFiles}
               onGoogleSignIn={store.handleGoogleSignIn}
               onGoogleSignOut={store.handleGoogleSignOut}
+              onCancelGoogleSignIn={store.cancelGoogleSignIn}
               onAutoDetectDrive={store.autoDetectAndSyncDriveSheets}
-              onSyncFromSheet={store.syncFromGoogleSheet}
-              onPushToSheet={store.pushToGoogleSheet}
+              onSyncFromSheet={(id, chId, chGas, mainGas) =>
+                store.syncFromGoogleSheet(id, chId, chGas, undefined, mainGas)
+              }
+              onPushToSheet={store.requestPushToGoogleSheet}
               onUpdateSheetsConfig={(patch) =>
                 store.setSheetsConfig((prev) => ({ ...prev, ...patch }))
               }
@@ -1340,7 +1489,15 @@ function MainApplication() {
         </div>
       )}
 
+      <SheetWriteConfirmModal
+        request={store.pendingWriteConfirmRequest}
+        isBusy={store.isSyncingSheets}
+        onConfirm={() => void store.confirmPendingSheetWrite()}
+        onCancel={store.cancelPendingSheetWrite}
+      />
+
       <OfflineIndicator />
     </div>
   );
 }
+

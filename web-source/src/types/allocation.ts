@@ -36,6 +36,7 @@ export type RegisterId =
 export type ReportTemplateId =
   | RegisterId
   | 'monthly-dist'
+  | 'alloc-summary'
   | 'monthly-cash'
   | 'monthly-ep'
   | 'alloc-food'
@@ -519,6 +520,7 @@ export interface AllocationSheetsConfig {
   appsScriptUrl: string;
   apiSecret: string;
   autoSync: boolean;
+  writeConfirmedSheetIds?: string[];
   lastSyncAt?: string;
   lastSyncStatus?: 'idle' | 'ok' | 'error';
   lastSyncMessage?: string;
@@ -568,6 +570,7 @@ export const REPORT_TEMPLATE_CATALOG: TemplateCatalogItem[] = [
   { id: 'reg-vwb', label: 'ভিডাব্লিউভি রেজিস্টার', kind: 'register', defaultOrientation: 'landscape', defaultSubject: 'ভিডাব্লিউভি (VWB) কর্মসূচির বরাদ্দ ও ডিও বিতরণ রেজিস্টার' },
   { id: 'reg-challan', label: 'চালান রেজিস্টার', kind: 'register', defaultOrientation: 'landscape', defaultSubject: 'ট্রেজারি চালান ও গরমিল যাচাই রেজিস্টার' },
   { id: 'monthly-dist', label: 'মাসিক বিতরণ রিপোর্ট', kind: 'report', defaultOrientation: 'portrait', defaultSubject: 'মাস ভিত্তিক ও খাত ভিত্তিক খাদ্য শস্য বিলি আদেশের তথ্য প্রেরণ।' },
+  { id: 'alloc-summary', label: 'বরাদ্দ ও বিতরণ স্থিতি', kind: 'report', defaultOrientation: 'portrait', defaultSubject: 'খাত ভিত্তিক প্রাপ্ত বরাদ্দ, উপবরাদ্দ, ডিও ইস্যু ও অবশিষ্ট স্থিতির বিবরণী।' },
   { id: 'monthly-cash', label: 'নগদ বিক্রয় রিপোর্ট', kind: 'report', defaultOrientation: 'portrait', defaultSubject: 'নগদ মূল্যে বিক্রিত খাদ্য শস্যের মাসিক হিসাব বিবরণী।' },
   { id: 'monthly-ep', label: 'ইপি রেশন রিপোর্ট', kind: 'report', defaultOrientation: 'portrait', defaultSubject: 'ইপি গ্রাহকদের অনুকূলে সরবরাহকৃত রেশনের (চাল ও গম) পরিমাণ।' },
   { id: 'alloc-food', label: 'খাদ্য বান্ধব বরাদ্দাদেশ', kind: 'report', defaultOrientation: 'landscape', defaultSubject: 'খাদ্য বান্ধব কর্মসূচির {মাস} {বছর} মাসের উপবরাদ্দ আদেশ।' },
@@ -667,3 +670,4 @@ export function createDefaultTemplatesMap(
   }
   return map;
 }
+

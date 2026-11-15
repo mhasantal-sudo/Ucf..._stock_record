@@ -15,13 +15,12 @@ import {
 import { DEFAULT_ANDROID_CONFIG } from '../shared/androidConfig';
 import { triggerBlobDownload } from '../shared/downloadUtils';
 import { getApiBaseOrigin, isInEmbeddedIframe } from '../shared/googleAuth';
-
-interface SourceFileItem {
-  path: string;
-  category: string;
-  size: number;
-  content: string;
-}
+import {
+  buildFilesZipFromList,
+  fetchAndroidSourceFilesWithFallback,
+  fetchWebSourceFilesWithFallback,
+  type SourceFileItem,
+} from '../shared/sourceBundleClient';
 
 interface SourceCodeCopyModalProps {
   isOpen: boolean;
@@ -94,47 +93,19 @@ export const SourceCodeCopyModal: React.FC<SourceCodeCopyModalProps> = ({
       setLoading(true);
       setError(null);
       try {
-        const apiBaseOrigin = getApiBaseOrigin();
         if (scope === 'web') {
           if (webFiles.length > 0) {
             setLoading(false);
             return;
           }
-          const res = await fetch(`${apiBaseOrigin}/api/source-files`);
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          const data = (await res.json()) as {
-            ok: boolean;
-            files?: SourceFileItem[];
-            error?: string;
-          };
-          if (!data.ok || !Array.isArray(data.files)) {
-            throw new Error(data.error || 'সোর্স ফাইল লোড করা যায়নি।');
-          }
+          const files = await fetchWebSourceFilesWithFallback();
           if (!cancelled) {
-            setWebFiles(data.files);
+            setWebFiles(files);
           }
         } else {
-          const res = await fetch(`${apiBaseOrigin}/api/android-source-files`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              ...DEFAULT_ANDROID_CONFIG,
-              appName: apkAppName.trim() || DEFAULT_ANDROID_CONFIG.appName,
-              packageName: apkPackageName.trim() || DEFAULT_ANDROID_CONFIG.packageName,
-              targetUrl: window.location.origin,
-            }),
-          });
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          const data = (await res.json()) as {
-            ok: boolean;
-            files?: SourceFileItem[];
-            error?: string;
-          };
-          if (!data.ok || !Array.isArray(data.files)) {
-            throw new Error(data.error || 'Android ফাইল লোড করা যায়নি।');
-          }
+          const files = await fetchAndroidSourceFilesWithFallback(apkAppName, apkPackageName);
           if (!cancelled) {
-            setAndroidFiles(data.files);
+            setAndroidFiles(files);
           }
         }
       } catch (err) {
@@ -142,7 +113,7 @@ export const SourceCodeCopyModal: React.FC<SourceCodeCopyModalProps> = ({
           setError(
             err instanceof Error
               ? err.message
-              : 'সোর্স কোড লোড করা যায়নি। মোবাইল Chrome দিয়ে সার্ভার লিংকে খুলুন।'
+              : 'সোর্স কোড লোড করা যায়নি।'
           );
         }
       } finally {
@@ -224,6 +195,24 @@ export const SourceCodeCopyModal: React.FC<SourceCodeCopyModalProps> = ({
   const handleCopyDownloadUrl = async (urlToCopy: string, key: string) => {
     const ok = await copyTextReliable(urlToCopy);
     if (ok) markCopied(key);
+  };
+
+  const handleDownloadTxtClient = () => {
+    if (filteredFiles.length === 0) return;
+    const combined = buildCombinedSourceText(filteredFiles);
+    triggerTextDownload(combinedTxtFileName, combined);
+    markCopied('DOWNLOAD_TXT');
+  };
+
+  const handleDownloadZipFromModal = async () => {
+    if (filteredFiles.length === 0) return;
+    const blob = await buildFilesZipFromList(filteredFiles);
+    const zipName =
+      scope === 'web'
+        ? 'khaddo-boraddo-web-source.zip'
+        : 'khaddo-boraddo-android-source.zip';
+    triggerBlobDownload(blob, zipName);
+    markCopied('DOWNLOAD_ZIP');
   };
 
   const handleDownloadAllSeparate = async () => {
@@ -334,26 +323,55 @@ export const SourceCodeCopyModal: React.FC<SourceCodeCopyModalProps> = ({
               )}
             </button>
 
-            <a
-              href={directTxtPath}
-              target={inIframe ? '_blank' : undefined}
-              rel={inIframe ? 'noopener noreferrer' : undefined}
-              download={inIframe ? undefined : combinedTxtFileName}
-              onClick={() => markCopied('DOWNLOAD_TXT')}
-              className="min-h-[38px] inline-flex items-center gap-1.5 rounded-xl bg-[#E2136E] hover:bg-[#B80D58] px-3 py-1.5 text-xs font-bold text-white shrink-0"
+            <button
+              type="button"
+              onClick={() => void handleDownloadZipFromModal()}
+              disabled={filteredFiles.length === 0}
+              className="min-h-[38px] inline-flex items-center gap-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 px-3 py-1.5 text-xs font-bold text-white cursor-pointer shrink-0"
+            >
+              {copiedKey === 'DOWNLOAD_ZIP' ? (
+                <>
+                  <Check className="h-3.5 w-3.5" />
+                  <span>ZIP ডাউনলোড শুরু!</span>
+                </>
+              ) : (
+                <>
+                  <Download className="h-3.5 w-3.5" />
+                  <span>ZIP ডাউনলোড ({filteredFiles.length})</span>
+                </>
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={handleDownloadTxtClient}
+              disabled={filteredFiles.length === 0}
+              className="min-h-[38px] inline-flex items-center gap-1.5 rounded-xl bg-[#E2136E] hover:bg-[#B80D58] disabled:opacity-50 px-3 py-1.5 text-xs font-bold text-white cursor-pointer shrink-0"
             >
               {copiedKey === 'DOWNLOAD_TXT' ? (
                 <>
                   <Check className="h-3.5 w-3.5" />
-                  <span>{inIframe ? 'নতুন ট্যাবে খোলা হয়েছে' : 'ডাউনলোড শুরু হয়েছে'}</span>
+                  <span>.txt ডাউনলোড শুরু!</span>
                 </>
               ) : (
                 <>
                   <FileText className="h-3.5 w-3.5" />
-                  <span>সব ফাইল একসাথে ডাউনলোড (.txt)</span>
+                  <span>সব ফাইল একসাথে (.txt)</span>
                 </>
               )}
-            </a>
+            </button>
+
+            {inIframe && (
+              <a
+                href={directTxtPath}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="min-h-[38px] inline-flex items-center gap-1 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 px-2.5 py-1.5 text-[11px] font-bold text-slate-700 shrink-0"
+              >
+                <ExternalLink className="h-3 w-3" />
+                <span>নতুন ট্যাবে .txt</span>
+              </a>
+            )}
 
             {!inIframe &&
               (downloadProgress ? (
@@ -493,21 +511,15 @@ export const SourceCodeCopyModal: React.FC<SourceCodeCopyModalProps> = ({
                         )}
                       </button>
 
-                      <a
-                        href={`${apiBaseOrigin}/api/download-single-source-file?scope=${scope}&path=${encodeURIComponent(
-                          file.path
-                        )}&appName=${encodeURIComponent(apkAppName)}&packageName=${encodeURIComponent(
-                          apkPackageName
-                        )}`}
-                        target={inIframe ? '_blank' : undefined}
-                        rel={inIframe ? 'noopener noreferrer' : undefined}
-                        download={inIframe ? undefined : file.path.split('/').pop() || 'code.txt'}
-                        className="min-h-[34px] inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 px-2.5 py-1 text-[11px] font-bold text-slate-700"
+                      <button
+                        type="button"
+                        onClick={() => triggerTextDownload(file.path.split('/').pop() || 'code.txt', file.content)}
+                        className="min-h-[34px] inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 px-2.5 py-1 text-[11px] font-bold text-slate-700 cursor-pointer"
                         title="সরাসরি ফাইল ডাউনলোড"
                       >
                         <Download className="h-3 w-3" />
                         <span>সেভ</span>
-                      </a>
+                      </button>
 
                       <button
                         type="button"
@@ -545,3 +557,4 @@ export const SourceCodeCopyModal: React.FC<SourceCodeCopyModalProps> = ({
     </div>
   );
 };
+

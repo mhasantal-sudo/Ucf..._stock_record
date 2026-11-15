@@ -38,3 +38,4 @@ export function triggerBlobDownload(blob: Blob, fileName: string): void {
     URL.revokeObjectURL(url);
   }, 15000);
 }
+

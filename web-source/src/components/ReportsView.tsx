@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertCircle,
   BarChart3,
   BookOpen,
   Coins,
@@ -9,6 +10,7 @@ import {
   FileSpreadsheet,
   FileWarning,
   Flame,
+  Layers,
   Printer,
   RectangleHorizontal,
   Smartphone,
@@ -17,10 +19,13 @@ import {
 } from 'lucide-react';
 import {
   CATEGORIES,
+  REPORT_TEMPLATE_CATALOG,
+  createDefaultTemplate,
   type AllocationDatabase,
   type ReportTemplateId,
 } from '../types/allocation';
 import {
+  buildAllocationSummaryReport,
   buildCashSaleReport,
   buildEPRationReport,
   buildFoodAllocOrderMemos,
@@ -35,6 +40,8 @@ import {
   formatBnInt,
   formatBnMoney,
   formatBnQty,
+  isChallanOnOrBeforeDo,
+  isSamePartyName,
   normMemoNo,
   round2,
   round3,
@@ -53,6 +60,7 @@ import {
 
 export type ReportSectionId =
   | 'monthly-dist'
+  | 'alloc-summary'
   | 'monthly-cash'
   | 'monthly-ep'
   | 'alloc-food'
@@ -89,6 +97,7 @@ const REPORT_PARENT_GROUPS: Array<{
     label: 'মাসিক রিপোর্ট',
     items: [
       { id: 'monthly-dist', label: 'মাসিক বিতরণ রিপোর্ট', icon: BarChart3, bg: 'bg-rose-50 border-rose-200', fg: 'text-[#E2136E]' },
+      { id: 'alloc-summary', label: 'বরাদ্দ ও বিতরণ স্থিতি', icon: Layers, bg: 'bg-emerald-50 border-emerald-200', fg: 'text-emerald-700' },
       { id: 'monthly-cash', label: 'নগদ বিক্রয় রিপোর্ট', icon: Coins, bg: 'bg-amber-50 border-amber-200', fg: 'text-amber-700' },
       { id: 'monthly-ep', label: 'ইপি রেশন রিপোর্ট', icon: Flame, bg: 'bg-orange-50 border-orange-200', fg: 'text-orange-700' },
       { id: 'alloc-food', label: 'খাদ্য বান্ধব বরাদ্দাদেশ', icon: FileSpreadsheet, bg: 'bg-teal-50 border-teal-200', fg: 'text-teal-700' },
@@ -246,8 +255,26 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
     });
   };
 
-  const template = db.templates[activeReportId];
+  const template =
+    db.templates[activeReportId] ||
+    createDefaultTemplate(
+      REPORT_TEMPLATE_CATALOG.find((x) => x.id === activeReportId) ||
+        REPORT_TEMPLATE_CATALOG[0],
+      db.officer
+    );
   const colLabel = (key: string, def: string) => template.columnLabels[key]?.trim() || def;
+
+  const pendingAllocRows = useMemo(() => {
+    const summary = buildAllocationSummaryReport(db, catFilter);
+    return summary.rows.filter(
+      (r) =>
+        r.ministryQty > r.doQty + 0.0005 ||
+        (r.dcQty ?? 0) > r.doQty + 0.0005 ||
+        r.subQty > r.doQty + 0.0005 ||
+        r.projectQty > r.doQty + 0.0005 ||
+        r.unissuedQty > 0.0005
+    );
+  }, [db, catFilter]);
 
   const foodMemos = useMemo(
     () => buildFoodAllocOrderMemos(db, month0, year),
@@ -361,6 +388,79 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
         rows,
         totalRow,
         showRecipientBlock: true,
+        showIntroBlock: Boolean(template.introText.trim()),
+        showCopyBlock: template.showCopyBlock,
+      };
+    }
+
+    if (activeReportId === 'alloc-summary') {
+      const sum = buildAllocationSummaryReport(db, catFilter);
+      const leaves: DocColumnLeaf[] = [
+        { key: 'cat', label: colLabel('cat', 'খাতের নাম'), align: 'left' },
+        { key: 'grain', label: colLabel('grain', 'শস্য'), align: 'center' },
+        { key: 'ministry', label: colLabel('ministry', 'মন্ত্রণালয় বরাদ্দ'), align: 'right' },
+        { key: 'dc', label: colLabel('dc', 'ডিসি বরাদ্দ'), align: 'right' },
+        { key: 'sub', label: colLabel('sub', 'উপবরাদ্দ'), align: 'right' },
+        { key: 'doQty', label: colLabel('doQty', 'ডিও ইস্যু (বিতরণ)'), align: 'right' },
+        { key: 'remaining', label: colLabel('remaining', 'অবশিষ্ট / বাকি'), align: 'right' },
+      ];
+      return {
+        subjectResolved: resolvePlaceholders(template.subject),
+        introResolved: resolvePlaceholders(template.introText),
+        columns: leaves.map((l) => ({ label: l.label, leaf: l })),
+        leaves,
+        mergeDepth: 0,
+        showSerialCol: true,
+        serialColLabel: 'ক্রম',
+        colWidths: ['5%', '23%', '8%', '13%', '13%', '13%', '13%', '12%'],
+        tableLayoutFixed: true,
+        rows: sum.rows.map((r) => ({
+          id: r.category,
+          cells: {
+            cat: r.categoryBn,
+            grain: r.grain,
+            ministry: formatBnQty(r.ministryQty),
+            dc: r.dcQty === null ? '—' : formatBnQty(r.dcQty),
+            sub: formatBnQty(r.subQty),
+            doQty: formatBnQty(r.doQty),
+            remaining: formatBnQty(r.unissuedQty),
+          },
+          hasSignature: false,
+        })),
+        totalRow: {
+          label: template.totalLabel || 'সর্বমোট',
+          labelColSpan: 2,
+          values: {
+            ministry: formatBnQty(sum.totals.ministryQty),
+            dc: formatBnQty(sum.totals.dcQty),
+            sub: formatBnQty(sum.totals.subQty),
+            doQty: formatBnQty(sum.totals.doQty),
+            remaining: formatBnQty(sum.totals.unissuedQty),
+          },
+        },
+        kpiBoxes: [
+          {
+            label: 'মোট মন্ত্রণালয় বরাদ্দ',
+            value: `${formatBnQty(sum.totals.ministryQty)} মে.টন`,
+            tone: 'neutral',
+          },
+          {
+            label: 'মোট উপবরাদ্দ',
+            value: `${formatBnQty(sum.totals.subQty)} মে.টন`,
+            tone: 'emerald',
+          },
+          {
+            label: 'মোট ডিও ইস্যু',
+            value: `${formatBnQty(sum.totals.doQty)} মে.টন`,
+            tone: 'emerald',
+          },
+          {
+            label: 'ডিও ইস্যু বাকি',
+            value: `${formatBnQty(sum.totals.unissuedQty)} মে.টন`,
+            tone: 'amber',
+          },
+        ],
+        showRecipientBlock: false,
         showIntroBlock: Boolean(template.introText.trim()),
         showCopyBlock: template.showCopyBlock,
       };
@@ -654,38 +754,42 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
         showSerialCol: true,
         serialColLabel: 'ক্রম',
         rows: filtered.map((d) => {
+          const validForDo = (c: AllocationDatabase['challans'][number]): boolean =>
+            c.category === d.category &&
+            isSamePartyName(c.dealerName, d.recipientName) &&
+            isChallanOnOrBeforeDo(c.challanDate, d.issueDate, false);
           const mainRec = d.challanNo
             ? db.challans.find(
                 (c) =>
                   c.challanType === 'মূল চালান' &&
-                  normMemoNo(c.challanNo) === normMemoNo(d.challanNo)
+                  normMemoNo(c.challanNo) === normMemoNo(d.challanNo) &&
+                  validForDo(c)
               )
-            : d.dealerAllocationId
-              ? db.challans.find(
-                  (c) =>
-                    c.challanType === 'মূল চালান' &&
-                    c.dealerAllocationId &&
-                    normMemoNo(c.dealerAllocationId) === normMemoNo(d.dealerAllocationId)
-                )
-              : undefined;
+            : db.challans.find(
+                (c) =>
+                  c.challanType === 'মূল চালান' &&
+                  c.doNo &&
+                  normMemoNo(c.doNo) === normMemoNo(d.doNo) &&
+                  validForDo(c)
+              );
           const taxRec = d.taxChallanNo
             ? db.challans.find(
                 (c) =>
                   c.challanType === 'আয়কর চালান' &&
-                  normMemoNo(c.challanNo) === normMemoNo(d.taxChallanNo)
+                  normMemoNo(c.challanNo) === normMemoNo(d.taxChallanNo) &&
+                  validForDo(c)
               )
-            : d.dealerAllocationId
-              ? db.challans.find(
-                  (c) =>
-                    c.challanType === 'আয়কর চালান' &&
-                    c.dealerAllocationId &&
-                    normMemoNo(c.dealerAllocationId) === normMemoNo(d.dealerAllocationId)
-                )
-              : undefined;
-          const mainNo = d.challanNo || mainRec?.challanNo;
-          const taxNo = d.taxChallanNo || taxRec?.challanNo;
-          const mainAmt = d.challanAmount || mainRec?.depositedAmount || 0;
-          const taxAmt = d.taxChallanAmount || taxRec?.depositedAmount || 0;
+            : db.challans.find(
+                (c) =>
+                  c.challanType === 'আয়কর চালান' &&
+                  c.doNo &&
+                  normMemoNo(c.doNo) === normMemoNo(d.doNo) &&
+                  validForDo(c)
+              );
+          const mainNo = mainRec?.challanNo || (isChallanOnOrBeforeDo(d.challanDate, d.issueDate, false) ? d.challanNo : undefined);
+          const taxNo = taxRec?.challanNo || (isChallanOnOrBeforeDo(d.taxChallanDate, d.issueDate, false) ? d.taxChallanNo : undefined);
+          const mainAmt = mainNo ? (mainRec?.depositedAmount || d.challanAmount || 0) : 0;
+          const taxAmt = taxNo ? (taxRec?.depositedAmount || d.taxChallanAmount || 0) : 0;
           const challanParts: string[] = [];
           if (mainNo || mainAmt > 0) {
             challanParts.push(
@@ -1050,7 +1154,9 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
           </div>
 
           {/* Contextual Extra Filters */}
-          {(activeReportId === 'monthly-dist' || activeReportId === 'do-reg-issue') && (
+          {(activeReportId === 'monthly-dist' ||
+            activeReportId === 'alloc-summary' ||
+            activeReportId === 'do-reg-issue') && (
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
               <div>
                 <label className="block text-[11px] font-bold text-slate-600 mb-1">খাত ফিল্টার</label>
@@ -1183,6 +1289,47 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
         </div>
       </div>
 
+      {activeReportId === 'monthly-dist' && pendingAllocRows.length > 0 && (
+        <div className="no-print rounded-2xl border border-amber-200 bg-amber-50/90 px-4 py-3 text-xs text-amber-950 space-y-2">
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div className="flex items-start gap-2">
+              <AlertCircle className="h-4 w-4 text-amber-600 shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <div className="font-bold text-amber-900">
+                  মাসিক বিতরণ রিপোর্টে কেবল &quot;ডিও ইস্যু&quot; হওয়া পরিমাণ হিসাব হয়
+                </div>
+                <p className="text-[11px] leading-relaxed text-amber-800">
+                  নিচের খাতগুলোতে বরাদ্দ/উপবরাদ্দ এন্ট্রি করা আছে কিন্তু এখনো সম্পূর্ণ ডিও ইস্যু হয়নি, তাই ফরম ৩.১-এ বিতরণ ০ দেখাচ্ছে:
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => onSelectReport('alloc-summary')}
+              className="shrink-0 rounded-xl bg-amber-600 hover:bg-amber-700 text-white px-3 py-1.5 text-[11px] font-bold cursor-pointer transition-colors"
+            >
+              বরাদ্দ ও বিতরণ স্থিতি দেখুন
+            </button>
+          </div>
+          <div className="flex flex-wrap gap-1.5 pl-6">
+            {pendingAllocRows.map((r) => {
+              const allocVal = Math.max(r.ministryQty, r.dcQty ?? 0, r.subQty, r.projectQty);
+              return (
+                <span
+                  key={r.category}
+                  className="inline-flex items-center gap-1 rounded-lg border border-amber-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-800"
+                >
+                  <span className="font-bold text-[#E2136E]">{r.category}:</span>
+                  <span>মোট বরাদ্দ {formatBnQty(allocVal)}</span>
+                  <span className="text-slate-400">·</span>
+                  <span>ডিও ইস্যু {formatBnQty(r.doQty)} মে.টন</span>
+                </span>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Rendered A4 Official Report + Single-Line Floating Export Bar */}
       <div className="relative">
         <OfficialA4Document
@@ -1282,3 +1429,4 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
     </div>
   );
 };
+

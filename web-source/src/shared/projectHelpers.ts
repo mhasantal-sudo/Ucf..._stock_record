@@ -143,3 +143,4 @@ export function matchesProjectPin(storedPin: string | undefined, enteredPin: str
   if (cleanStored === cleanEntered) return true;
   return bnToEnDigits(cleanStored) === bnToEnDigits(cleanEntered);
 }
+
