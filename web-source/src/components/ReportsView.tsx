@@ -427,22 +427,22 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
         showSerialCol: true,
         serialColLabel: 'ক্রম',
         colWidths: [
-          '4%',
-          '18%',
-          '6.5%',
-          '6.5%',
-          '6.5%',
-          '6.5%',
-          '6.5%',
-          '6.5%',
-          '6.5%',
-          '6.5%',
-          '6.5%',
-          '6.5%',
-          '6.5%',
-          '6.5%',
+          '3.6%',
+          '14.8%',
+          '6.8%',
+          '6.8%',
+          '6.8%',
+          '6.8%',
+          '6.8%',
+          '6.8%',
+          '6.8%',
+          '6.8%',
+          '6.8%',
+          '6.8%',
+          '6.8%',
+          '6.8%',
         ],
-        tableLayoutFixed: true,
+        tableLayoutFixed: false,
         rows,
         totalRow,
         showRecipientBlock: true,
@@ -1552,6 +1552,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
           showIntroBlock={reportPayload.showIntroBlock}
           showCopyBlock={reportPayload.showCopyBlock}
           showOfficerSignatureBlock={true}
+          compactSinglePage={activeReportId === 'monthly-dist' && currentOrientation === 'portrait'}
           pdfFileName={`${activeReportId}-${new Date().toISOString().slice(0, 10)}.pdf`}
           onEditTemplate={() => onEditTemplate(activeReportId)}
         />
@@ -1622,4 +1623,6 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
     </div>
   );
 };
+
+
 

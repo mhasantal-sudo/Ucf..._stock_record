@@ -61,7 +61,7 @@ import {
 import { ALLOC_SHEET_TABS, buildMainAppsScriptCode } from '../shared/allocSheetsSync';
 import { triggerBlobDownload } from '../shared/downloadUtils';
 import { extractSpreadsheetId } from '../shared/googleSheetsSync';
-import { formatBnInt, formatBnMoney, formatBnQty, parseNum, toBnDigits } from '../shared/bnUtils';
+import { bnToEnDigits, formatBnInt, formatBnMoney, formatBnQty, parseNum, toBnDigits } from '../shared/bnUtils';
 import type { ActionResult, SheetSyncUiState } from '../store/useAllocationStore';
 import type { GitHubPushResult } from '../shared/githubPush';
 import {
@@ -124,6 +124,71 @@ interface AllocationSettingsViewProps {
 }
 
 const SHEET_TABS_REFERENCE = Object.values(ALLOC_SHEET_TABS).map((t) => t.name);
+
+const DraftNumberInput: React.FC<{
+  value: number;
+  min: number;
+  max: number;
+  step?: string | number;
+  fallback: number;
+  allowDecimal?: boolean;
+  onCommit: (nextVal: number) => void;
+  className?: string;
+}> = ({
+  value,
+  min,
+  max,
+  step = 1,
+  fallback,
+  allowDecimal = false,
+  onCommit,
+  className = '',
+}) => {
+  const [draft, setDraft] = useState(String(value));
+  const [focused, setFocused] = useState(false);
+
+  useEffect(() => {
+    if (!focused) {
+      setDraft(String(value));
+    }
+  }, [value, focused]);
+
+  const parseDraft = (raw: string): number | null => {
+    const cleaned = bnToEnDigits(raw).replace(/,/g, '').trim();
+    if (!cleaned || cleaned === '-' || cleaned === '.') return null;
+    const n = Number(cleaned);
+    if (!Number.isFinite(n)) return null;
+    return allowDecimal ? Math.round(n * 100) / 100 : Math.round(n);
+  };
+
+  return (
+    <input
+      type="number"
+      step={step}
+      min={min}
+      max={max}
+      value={draft}
+      onFocus={() => setFocused(true)}
+      onChange={(e) => {
+        const raw = e.target.value;
+        setDraft(raw);
+        const parsed = parseDraft(raw);
+        if (parsed !== null && parsed >= min && parsed <= max) {
+          onCommit(parsed);
+        }
+      }}
+      onBlur={() => {
+        setFocused(false);
+        const parsed = parseDraft(draft);
+        const finalVal =
+          parsed === null ? fallback : Math.max(min, Math.min(max, parsed));
+        onCommit(finalVal);
+        setDraft(String(finalVal));
+      }}
+      className={className}
+    />
+  );
+};
 
 const REPORT_DEFAULT_COLUMNS: Record<string, Array<{ key: string; label: string }>> = {
   'monthly-dist': [
@@ -1790,52 +1855,52 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
                 </div>
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">উপর (মিমি)</label>
-                  <input
-                    type="number"
+                  <DraftNumberInput
                     value={activeTemplate.marginTopMm}
-                    onChange={(e) =>
-                      onUpdateTemplate(selectedTemplateId, {
-                        marginTopMm: Math.max(4, Math.min(30, Number(e.target.value) || 10)),
-                      })
+                    min={2}
+                    max={35}
+                    fallback={10}
+                    onCommit={(val) =>
+                      onUpdateTemplate(selectedTemplateId, { marginTopMm: val })
                     }
                     className="w-full rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-center"
                   />
                 </div>
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">নিচ (মিমি)</label>
-                  <input
-                    type="number"
+                  <DraftNumberInput
                     value={activeTemplate.marginBottomMm}
-                    onChange={(e) =>
-                      onUpdateTemplate(selectedTemplateId, {
-                        marginBottomMm: Math.max(4, Math.min(30, Number(e.target.value) || 10)),
-                      })
+                    min={2}
+                    max={35}
+                    fallback={10}
+                    onCommit={(val) =>
+                      onUpdateTemplate(selectedTemplateId, { marginBottomMm: val })
                     }
                     className="w-full rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-center"
                   />
                 </div>
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">বাম (মিমি)</label>
-                  <input
-                    type="number"
+                  <DraftNumberInput
                     value={activeTemplate.marginLeftMm}
-                    onChange={(e) =>
-                      onUpdateTemplate(selectedTemplateId, {
-                        marginLeftMm: Math.max(4, Math.min(30, Number(e.target.value) || 10)),
-                      })
+                    min={2}
+                    max={35}
+                    fallback={10}
+                    onCommit={(val) =>
+                      onUpdateTemplate(selectedTemplateId, { marginLeftMm: val })
                     }
                     className="w-full rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-center"
                   />
                 </div>
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">ডান (মিমি)</label>
-                  <input
-                    type="number"
+                  <DraftNumberInput
                     value={activeTemplate.marginRightMm}
-                    onChange={(e) =>
-                      onUpdateTemplate(selectedTemplateId, {
-                        marginRightMm: Math.max(4, Math.min(30, Number(e.target.value) || 10)),
-                      })
+                    min={2}
+                    max={35}
+                    fallback={10}
+                    onCommit={(val) =>
+                      onUpdateTemplate(selectedTemplateId, { marginRightMm: val })
                     }
                     className="w-full rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-center"
                   />
@@ -1845,14 +1910,15 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-center pt-1">
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">ফন্ট সাইজ (pt)</label>
-                  <input
-                    type="number"
-                    step="0.5"
+                  <DraftNumberInput
                     value={activeTemplate.fontSizePt}
-                    onChange={(e) =>
-                      onUpdateTemplate(selectedTemplateId, {
-                        fontSizePt: Math.max(7.5, Math.min(13, Number(e.target.value) || 9.5)),
-                      })
+                    min={6}
+                    max={16}
+                    step="0.5"
+                    allowDecimal
+                    fallback={9.5}
+                    onCommit={(val) =>
+                      onUpdateTemplate(selectedTemplateId, { fontSizePt: val })
                     }
                     className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-1.5"
                   />
@@ -1861,18 +1927,14 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
                   <label className="block font-bold text-slate-700 mb-1">
                     স্বাক্ষর উচ্চতা (px) — {activeTemplate.kind === 'register' ? 'রেজিস্টার' : 'রিপোর্ট'}
                   </label>
-                  <input
-                    type="number"
-                    min={14}
-                    max={90}
+                  <DraftNumberInput
                     value={activeTemplate.signatureHeightPx}
-                    onChange={(e) =>
-                      onUpdateTemplate(selectedTemplateId, {
-                        signatureHeightPx: Math.max(
-                          14,
-                          Math.min(90, Number(e.target.value) || (activeTemplate.kind === 'register' ? 26 : 38))
-                        ),
-                      })
+                    min={10}
+                    max={120}
+                    step={1}
+                    fallback={activeTemplate.kind === 'register' ? 26 : 38}
+                    onCommit={(val) =>
+                      onUpdateTemplate(selectedTemplateId, { signatureHeightPx: val })
                     }
                     className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-1.5"
                   />
@@ -3544,4 +3606,6 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
     </div>
   );
 };
+
+
 

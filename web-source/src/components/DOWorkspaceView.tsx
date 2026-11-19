@@ -849,149 +849,137 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
                         </label>
                       </div>
 
-                      <div className="overflow-x-auto">
-                        <table className="w-full text-xs border-collapse tabular-nums">
-                          <thead>
-                            <tr className="bg-slate-50/60 border-b border-slate-200 text-slate-700 font-bold">
-                              <th className="py-2 px-2.5 text-center whitespace-nowrap w-20">
-                                ইস্যু করুন
-                              </th>
-                              <th className="py-2 px-2.5 text-left">ইউনিয়ন ও প্রাপক</th>
-                              <th className="py-2 px-2.5 text-right whitespace-nowrap">বাকি পরিমাণ</th>
-                              <th className="py-2 px-2.5 text-center whitespace-nowrap">চালান যাচাই</th>
-                              <th className="py-2 px-2.5 text-center min-w-[160px]">ডিও নং</th>
-                              <th className="py-2 px-2.5 text-center w-36">ইস্যু তারিখ</th>
-                              <th className="py-2 px-2.5 text-center whitespace-nowrap">একক সংরক্ষণ</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-slate-100">
-                            {grp.items.map((p) => {
-                              const rowDraft = pendingInputs[p.key] || { doNo: '', date: doBatchDate };
-                              const check =
-                                previewChecksByKey.get(p.key) ||
-                                verifyChallan(p.category, p.recipientName, p.remaining, {
-                                  subId: p.subId,
-                                  unoDate: p.unoDate,
-                                  unoMemo: p.unoMemo,
-                                  ministryMemo: p.ministryMemo,
-                                  issueDate: rowDraft.date || doBatchDate,
-                                });
-                              const isChecked = Boolean(rowDraft.doNo.trim());
-                              const showVerify = verifyTargetKey === p.key;
+                      <div className="divide-y divide-slate-200">
+                        {grp.items.map((p) => {
+                          const rowDraft = pendingInputs[p.key] || { doNo: '', date: doBatchDate };
+                          const check =
+                            previewChecksByKey.get(p.key) ||
+                            verifyChallan(p.category, p.recipientName, p.remaining, {
+                              subId: p.subId,
+                              unoDate: p.unoDate,
+                              unoMemo: p.unoMemo,
+                              ministryMemo: p.ministryMemo,
+                              issueDate: rowDraft.date || doBatchDate,
+                            });
+                          const isChecked = Boolean(rowDraft.doNo.trim());
+                          const showVerify = verifyTargetKey === p.key;
 
-                              return (
-                                <React.Fragment key={p.key}>
-                                  <tr className={isChecked ? 'bg-rose-50/40' : 'hover:bg-slate-50/70'}>
-                                    <td className="py-2 px-2.5 text-center">
-                                      <input
-                                        type="checkbox"
-                                        checked={isChecked}
-                                        onChange={(e) => toggleSingleRowIssue(p, e.target.checked)}
-                                        aria-label={`${p.recipientName} ইস্যু করুন`}
-                                        className="h-4 w-4 accent-[#E2136E] cursor-pointer"
-                                      />
-                                    </td>
-                                    <td className="py-2 px-2.5">
-                                      <div className="font-bold text-slate-900 flex flex-wrap items-center gap-1.5">
-                                        <span>{p.recipientName}</span>
-                                        {resolveItemGrain(p.category, p.ministryMemo) === 'কার্নেল' && (
-                                          <span className="inline-flex items-center rounded-full border border-emerald-300 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-bold text-emerald-900">
-                                            কার্নেল
-                                          </span>
-                                        )}
-                                      </div>
-                                      <div className="text-[11px] text-slate-500">
-                                        {p.unionName}
-                                        {p.salesCenter ? ` · ${p.salesCenter}` : ''}
-                                        {p.projectNo ? ` · প্রকল্প: ${toBnDigits(p.projectNo)}` : ''}
-                                      </div>
-                                    </td>
-                                    <td className="py-2 px-2.5 text-right font-bold text-[#E2136E] whitespace-nowrap">
-                                      {formatBnQty(p.remaining)} মে.টন
-                                    </td>
-                                    <td className="py-2 px-2.5 text-center">
-                                      {!check.applicable ? (
-                                        <span className="text-[11px] text-slate-500">প্রযোজ্য নয়</span>
-                                      ) : (
-                                        <button
-                                          type="button"
-                                          onClick={() => setVerifyTargetKey(showVerify ? null : p.key)}
-                                          className={`rounded border px-2 py-1 text-[11px] font-bold cursor-pointer whitespace-nowrap ${
-                                            check.ok
-                                              ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
-                                              : 'border-amber-300 bg-amber-50 text-amber-800'
-                                          }`}
-                                        >
-                                          {check.ok ? 'চালান সঠিক' : 'যাচাই দেখুন'}
-                                        </button>
+                          return (
+                            <div
+                              key={p.key}
+                              className={`p-3 transition-colors ${
+                                isChecked ? 'bg-rose-50/40' : 'hover:bg-slate-50/70'
+                              }`}
+                            >
+                              <div className="grid grid-cols-1 lg:grid-cols-12 lg:items-center gap-2.5 text-xs tabular-nums">
+                                {/* Checkbox + Recipient & Union/SalesCenter/Project */}
+                                <div className="lg:col-span-5 flex items-start gap-2.5 min-w-0">
+                                  <input
+                                    type="checkbox"
+                                    checked={isChecked}
+                                    onChange={(e) => toggleSingleRowIssue(p, e.target.checked)}
+                                    aria-label={`${p.recipientName} ইস্যু করুন`}
+                                    className="mt-0.5 h-5 w-5 shrink-0 accent-[#E2136E] cursor-pointer"
+                                  />
+                                  <div className="min-w-0 flex-1">
+                                    <div className="font-bold text-slate-900 text-[13px] flex flex-wrap items-center gap-1.5 break-words">
+                                      <span>{p.recipientName}</span>
+                                      {resolveItemGrain(p.category, p.ministryMemo) === 'কার্নেল' && (
+                                        <span className="inline-flex items-center rounded-full border border-emerald-300 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-bold text-emerald-900">
+                                          কার্নেল
+                                        </span>
                                       )}
-                                    </td>
-                                    <td className="py-1.5 px-2">
-                                      <input
-                                        type="text"
-                                        list="unused-do-datalist"
-                                        value={rowDraft.doNo}
-                                        placeholder="ডিও নং"
-                                        onChange={(e) =>
-                                          setPendingInputs((prev) => ({
-                                            ...prev,
-                                            [p.key]: { ...rowDraft, doNo: e.target.value },
-                                          }))
-                                        }
-                                        className="min-w-[140px] w-36 sm:w-44 rounded border border-slate-300 bg-white px-3 py-1.5 text-sm font-bold text-center focus:outline-none focus:border-[#E2136E]"
-                                      />
-                                    </td>
-                                    <td className="py-1.5 px-2">
-                                      <input
-                                        type="date"
-                                        value={rowDraft.date}
-                                        onChange={(e) =>
-                                          setPendingInputs((prev) => ({
-                                            ...prev,
-                                            [p.key]: { ...rowDraft, date: e.target.value },
-                                          }))
-                                        }
-                                        className="w-full rounded border border-slate-300 bg-white px-2 py-1.5 text-xs"
-                                      />
-                                    </td>
-                                    <td className="py-1.5 px-2 text-center">
-                                      <button
-                                        type="button"
-                                        disabled={!rowDraft.doNo.trim()}
-                                        onClick={() => handleIssueSingleRow(p)}
-                                        className="rounded bg-slate-900 hover:bg-slate-800 disabled:opacity-40 px-2.5 py-1.5 text-[11px] font-bold text-white cursor-pointer whitespace-nowrap"
-                                      >
-                                        ইস্যু
-                                      </button>
-                                    </td>
-                                  </tr>
-                                  {showVerify && check.applicable && (
-                                    <tr className="bg-slate-50">
-                                      <td colSpan={7} className="px-4 py-2 text-xs">
-                                        <div className="flex flex-wrap items-center gap-4">
-                                          <span>
-                                            প্রয়োজনীয় মূল টাকা: <strong>{formatBnMoney(check.requiredAmount || 0)} ৳</strong>{' '}
-                                            ({check.mainChallan ? `জমা: ${formatBnMoney(check.mainChallan.depositedAmount)} ৳` : 'চালান নেই'})
-                                          </span>
-                                          <span>
-                                            প্রয়োজনীয় আয়কর: <strong>{formatBnMoney(check.requiredTaxAmount || 0)} ৳</strong>{' '}
-                                            ({check.taxChallan ? `জমা: ${formatBnMoney(check.taxChallan.depositedAmount)} ৳` : 'চালান নেই'})
-                                          </span>
-                                          {check.errors && check.errors.length > 0 && (
-                                            <span className="inline-flex items-center gap-1 font-bold text-rose-700">
-                                              <AlertTriangle className="h-3.5 w-3.5" />
-                                              {check.errors.join(' · ')}
-                                            </span>
-                                          )}
-                                        </div>
-                                      </td>
-                                    </tr>
+                                    </div>
+                                    <div className="text-[11px] text-slate-500 break-words mt-0.5">
+                                      {p.unionName}
+                                      {p.salesCenter ? ` · ${p.salesCenter}` : ''}
+                                      {p.projectNo ? ` · প্রকল্প: ${toBnDigits(p.projectNo)}` : ''}
+                                    </div>
+                                  </div>
+                                </div>
+
+                                {/* Remaining Qty + Challan Verify */}
+                                <div className="lg:col-span-3 flex flex-wrap items-center justify-between lg:justify-end gap-2 pl-7 lg:pl-0">
+                                  <span className="font-bold text-[#E2136E] text-[13px] whitespace-nowrap">
+                                    {formatBnQty(p.remaining)} মে.টন
+                                  </span>
+                                  {!check.applicable ? (
+                                    <span className="text-[11px] text-slate-500">প্রযোজ্য নয়</span>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      onClick={() => setVerifyTargetKey(showVerify ? null : p.key)}
+                                      className={`min-h-[34px] rounded-lg border px-2.5 py-1 text-[11px] font-bold cursor-pointer whitespace-nowrap ${
+                                        check.ok
+                                          ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
+                                          : 'border-amber-300 bg-amber-50 text-amber-800'
+                                      }`}
+                                    >
+                                      {check.ok ? 'চালান সঠিক' : 'যাচাই দেখুন'}
+                                    </button>
                                   )}
-                                </React.Fragment>
-                              );
-                            })}
-                          </tbody>
-                        </table>
+                                </div>
+
+                                {/* DO No + Issue Date + Single Issue Button */}
+                                <div className="lg:col-span-4 grid grid-cols-12 gap-1.5 items-center pl-7 lg:pl-0">
+                                  <input
+                                    type="text"
+                                    list="unused-do-datalist"
+                                    value={rowDraft.doNo}
+                                    placeholder="ডিও নং"
+                                    onChange={(e) =>
+                                      setPendingInputs((prev) => ({
+                                        ...prev,
+                                        [p.key]: { ...rowDraft, doNo: e.target.value },
+                                      }))
+                                    }
+                                    className="col-span-5 min-h-[42px] w-full rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-sm font-bold text-center focus:outline-none focus:border-[#E2136E]"
+                                  />
+                                  <input
+                                    type="date"
+                                    value={rowDraft.date}
+                                    onChange={(e) =>
+                                      setPendingInputs((prev) => ({
+                                        ...prev,
+                                        [p.key]: { ...rowDraft, date: e.target.value },
+                                      }))
+                                    }
+                                    className="col-span-4 min-h-[42px] w-full rounded-lg border border-slate-300 bg-white px-1.5 py-1.5 text-[11px] sm:text-xs focus:outline-none focus:border-[#E2136E]"
+                                  />
+                                  <button
+                                    type="button"
+                                    disabled={!rowDraft.doNo.trim()}
+                                    onClick={() => handleIssueSingleRow(p)}
+                                    className="col-span-3 min-h-[42px] w-full rounded-lg bg-slate-900 hover:bg-slate-800 disabled:opacity-40 px-2 py-1.5 text-xs font-bold text-white cursor-pointer whitespace-nowrap"
+                                  >
+                                    ইস্যু
+                                  </button>
+                                </div>
+                              </div>
+
+                              {showVerify && check.applicable && (
+                                <div className="mt-2.5 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs">
+                                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+                                    <span>
+                                      প্রয়োজনীয় মূল টাকা: <strong>{formatBnMoney(check.requiredAmount || 0)} ৳</strong>{' '}
+                                      ({check.mainChallan ? `জমা: ${formatBnMoney(check.mainChallan.depositedAmount)} ৳` : 'চালান নেই'})
+                                    </span>
+                                    <span>
+                                      প্রয়োজনীয় আয়কর: <strong>{formatBnMoney(check.requiredTaxAmount || 0)} ৳</strong>{' '}
+                                      ({check.taxChallan ? `জমা: ${formatBnMoney(check.taxChallan.depositedAmount)} ৳` : 'চালান নেই'})
+                                    </span>
+                                    {check.errors && check.errors.length > 0 && (
+                                      <span className="inline-flex items-center gap-1 font-bold text-rose-700">
+                                        <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                                        {check.errors.join(' · ')}
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
                   );
@@ -1014,85 +1002,122 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
               <div className="text-xs font-bold text-slate-900">
                 {lockedCategory ? `${lockedCategory} — ` : ''}ইস্যুকৃত ডিও তালিকা ({formatBnInt(filteredIssuedDos.length)}টি)
               </div>
-              <div className="relative w-60">
-                <Search className="h-3.5 w-3.5 text-slate-400 absolute left-2.5 top-2.5" />
+              <div className="relative w-full sm:w-64">
+                <Search className="h-3.5 w-3.5 text-slate-400 absolute left-2.5 top-3" />
                 <input
                   type="text"
                   value={doSearch}
                   onChange={(e) => setDoSearch(e.target.value)}
                   placeholder="ডিও নং / ডিলার / ইউনিয়ন"
-                  className="w-full rounded-lg border border-slate-300 pl-8 pr-2.5 py-1.5 text-xs"
+                  className="w-full min-h-[38px] rounded-lg border border-slate-300 pl-8 pr-2.5 py-1.5 text-xs focus:outline-none focus:border-[#E2136E]"
                 />
               </div>
             </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs border-collapse tabular-nums">
-                <thead>
-                  <tr className="bg-slate-50 border-b border-slate-200 text-slate-700 font-bold">
-                    <th className="py-2 px-3 text-center">ডিও নং ও তারিখ</th>
-                    <th className="py-2 px-3 text-left">খাত</th>
-                    <th className="py-2 px-3 text-left">প্রাপক ও ইউনিয়ন</th>
-                    <th className="py-2 px-3 text-right">পরিমাণ (মে.টন)</th>
-                    <th className="py-2 px-3 text-left">চালান</th>
-                    <th className="py-2 px-3 text-center">কাজ</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {filteredIssuedDos.length === 0 ? (
-                    <tr>
-                      <td colSpan={6} className="py-6 text-center text-slate-500">
-                        এখনো কোনো ডিও ইস্যু করা হয়নি।
-                      </td>
-                    </tr>
-                  ) : (
-                    filteredIssuedDos.map((d) => {
-                      const isEditing = editingDoRow?.id === d.id;
-                      return (
-                        <tr key={d.id} className={isEditing ? 'bg-rose-50/50' : ''}>
-                          <td className="py-2 px-3 text-center">
-                            {isEditing ? (
-                              <div className="space-y-1">
-                                <input
-                                  type="text"
-                                  value={editingDoRow.doNo}
-                                  onChange={(e) =>
-                                    setEditingDoRow((prev) =>
-                                      prev ? { ...prev, doNo: e.target.value } : prev
-                                    )
-                                  }
-                                  className="w-28 rounded border border-slate-300 px-2 py-1 text-center font-bold text-xs"
-                                />
-                                <input
-                                  type="date"
-                                  value={editingDoRow.issueDate}
-                                  onChange={(e) =>
-                                    setEditingDoRow((prev) =>
-                                      prev ? { ...prev, issueDate: e.target.value } : prev
-                                    )
-                                  }
-                                  className="w-32 rounded border border-slate-300 px-2 py-1 text-xs"
-                                />
-                              </div>
-                            ) : (
-                              <>
-                                <div className="font-bold text-[#E2136E]">{toBnDigits(d.doNo)}</div>
-                                <div className="text-[11px] text-slate-500">{formatBnDate(d.issueDate)}</div>
-                              </>
-                            )}
-                          </td>
-                          <td className="py-2 px-3 font-semibold">
-                            <div>{d.category}</div>
-                            {resolveItemGrain(d.category, d.ministryMemo) === 'কার্নেল' && (
-                              <span className="inline-flex items-center rounded-full border border-emerald-300 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-bold text-emerald-900 mt-0.5">
-                                কার্নেল
+            <div className="hidden lg:grid lg:grid-cols-12 gap-2 px-3 py-2 bg-slate-50 border-b border-slate-200 text-xs font-bold text-slate-700">
+              <div className="lg:col-span-2">ডিও নং ও তারিখ</div>
+              <div className="lg:col-span-2">খাত</div>
+              <div className="lg:col-span-3">প্রাপক ও ইউনিয়ন</div>
+              <div className="lg:col-span-1 text-right">পরিমাণ</div>
+              <div className="lg:col-span-3">চালান (মূল ও আয়কর)</div>
+              <div className="lg:col-span-1 text-center">কাজ</div>
+            </div>
+            <div className="divide-y divide-slate-200">
+              {filteredIssuedDos.length === 0 ? (
+                <div className="py-6 text-center text-xs text-slate-500">
+                  এখনো কোনো ডিও ইস্যু করা হয়নি।
+                </div>
+              ) : (
+                filteredIssuedDos.map((d) => {
+                  const isEditing = editingDoRow?.id === d.id;
+                  const validForDo = (c: ChallanRecord): boolean =>
+                    c.category === d.category &&
+                    isSamePartyName(c.dealerName, d.recipientName) &&
+                    isChallanOnOrBeforeDo(c.challanDate, d.issueDate, false);
+                  const mainRec = d.challanNo
+                    ? db.challans.find(
+                        (c) =>
+                          c.challanType === 'মূল চালান' &&
+                          normChallanNo(c.challanNo) === normChallanNo(d.challanNo) &&
+                          validForDo(c)
+                      )
+                    : db.challans.find(
+                        (c) =>
+                          c.challanType === 'মূল চালান' &&
+                          c.doNo &&
+                          normMemoNo(c.doNo) === normMemoNo(d.doNo) &&
+                          validForDo(c)
+                      );
+                  const taxRec = d.taxChallanNo
+                    ? db.challans.find(
+                        (c) =>
+                          c.challanType === 'আয়কর চালান' &&
+                          normChallanNo(c.challanNo) === normChallanNo(d.taxChallanNo) &&
+                          validForDo(c)
+                      )
+                    : db.challans.find(
+                        (c) =>
+                          c.challanType === 'আয়কর চালান' &&
+                          c.doNo &&
+                          normMemoNo(c.doNo) === normMemoNo(d.doNo) &&
+                          validForDo(c)
+                      );
+                  const mainNo =
+                    mainRec?.challanNo ||
+                    (isChallanOnOrBeforeDo(d.challanDate, d.issueDate, false)
+                      ? d.challanNo
+                      : undefined);
+                  const taxNo =
+                    taxRec?.challanNo ||
+                    (isChallanOnOrBeforeDo(d.taxChallanDate, d.issueDate, false)
+                      ? d.taxChallanNo
+                      : undefined);
+                  const mainAmt = mainNo ? mainRec?.depositedAmount || d.challanAmount || 0 : 0;
+                  const taxAmt = taxNo ? taxRec?.depositedAmount || d.taxChallanAmount || 0 : 0;
+
+                  return (
+                    <div
+                      key={d.id}
+                      className={`p-3 text-xs tabular-nums ${isEditing ? 'bg-rose-50/50' : 'hover:bg-slate-50/60'}`}
+                    >
+                      <div className="grid grid-cols-1 lg:grid-cols-12 lg:items-center gap-2">
+                        {/* DO No + Issue Date */}
+                        <div className="lg:col-span-2 flex items-center justify-between lg:block gap-2">
+                          {isEditing ? (
+                            <div className="flex flex-wrap lg:flex-col gap-1.5 w-full">
+                              <input
+                                type="text"
+                                value={editingDoRow.doNo}
+                                onChange={(e) =>
+                                  setEditingDoRow((prev) =>
+                                    prev ? { ...prev, doNo: e.target.value } : prev
+                                  )
+                                }
+                                className="w-28 lg:w-full rounded border border-slate-300 px-2 py-1.5 text-center font-bold text-xs bg-white"
+                              />
+                              <input
+                                type="date"
+                                value={editingDoRow.issueDate}
+                                onChange={(e) =>
+                                  setEditingDoRow((prev) =>
+                                    prev ? { ...prev, issueDate: e.target.value } : prev
+                                  )
+                                }
+                                className="w-36 lg:w-full rounded border border-slate-300 px-2 py-1.5 text-xs bg-white"
+                              />
+                            </div>
+                          ) : (
+                            <div>
+                              <span className="font-bold text-[#E2136E] text-sm">
+                                ডিও নং {toBnDigits(d.doNo)}
                               </span>
-                            )}
-                          </td>
-                          <td className="py-2 px-3">
-                            <div className="font-bold text-slate-900">{d.recipientName}</div>
-                            <div className="text-[11px] text-slate-500">{d.unionName}</div>
-                          </td>
-                          <td className="py-2 px-3 text-right font-bold">
+                              <div className="text-[11px] text-slate-500">
+                                {formatBnDate(d.issueDate)}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Mobile Qty badge */}
+                          <div className="lg:hidden font-bold text-slate-900">
                             {isEditing ? (
                               <input
                                 type="number"
@@ -1103,145 +1128,144 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
                                     prev ? { ...prev, qty: e.target.value } : prev
                                   )
                                 }
-                                className="w-24 rounded border border-slate-300 px-2 py-1 text-right font-bold"
+                                className="w-24 rounded border border-slate-300 px-2 py-1.5 text-right font-bold bg-white"
                               />
                             ) : (
-                              formatBnQty(d.allocationQty)
+                              <span>{formatBnQty(d.allocationQty)} মে.টন</span>
                             )}
-                          </td>
-                          <td className="py-2 px-3 text-[11px] text-slate-700 space-y-0.5">
-                            {(() => {
-                              const validForDo = (c: ChallanRecord): boolean =>
-                                c.category === d.category &&
-                                isSamePartyName(c.dealerName, d.recipientName) &&
-                                isChallanOnOrBeforeDo(c.challanDate, d.issueDate, false);
-                              const mainRec = d.challanNo
-                                ? db.challans.find(
-                                    (c) =>
-                                      c.challanType === 'মূল চালান' &&
-                                      normChallanNo(c.challanNo) === normChallanNo(d.challanNo) &&
-                                      validForDo(c)
-                                  )
-                                : db.challans.find(
-                                    (c) =>
-                                      c.challanType === 'মূল চালান' &&
-                                      c.doNo &&
-                                      normMemoNo(c.doNo) === normMemoNo(d.doNo) &&
-                                      validForDo(c)
-                                  );
-                              const taxRec = d.taxChallanNo
-                                ? db.challans.find(
-                                    (c) =>
-                                      c.challanType === 'আয়কর চালান' &&
-                                      normChallanNo(c.challanNo) === normChallanNo(d.taxChallanNo) &&
-                                      validForDo(c)
-                                  )
-                                : db.challans.find(
-                                    (c) =>
-                                      c.challanType === 'আয়কর চালান' &&
-                                      c.doNo &&
-                                      normMemoNo(c.doNo) === normMemoNo(d.doNo) &&
-                                      validForDo(c)
-                                  );
-                              const mainNo = mainRec?.challanNo || (isChallanOnOrBeforeDo(d.challanDate, d.issueDate, false) ? d.challanNo : undefined);
-                              const taxNo = taxRec?.challanNo || (isChallanOnOrBeforeDo(d.taxChallanDate, d.issueDate, false) ? d.taxChallanNo : undefined);
-                              const mainAmt = mainNo ? (mainRec?.depositedAmount || d.challanAmount || 0) : 0;
-                              const taxAmt = taxNo ? (taxRec?.depositedAmount || d.taxChallanAmount || 0) : 0;
+                          </div>
+                        </div>
 
-                              if (!mainNo && !taxNo && mainAmt <= 0 && taxAmt <= 0) {
-                                return <span className="text-slate-400">—</span>;
+                        {/* Category + Kernel */}
+                        <div className="lg:col-span-2 font-semibold flex flex-wrap items-center gap-1.5">
+                          <span>{d.category}</span>
+                          {resolveItemGrain(d.category, d.ministryMemo) === 'কার্নেল' && (
+                            <span className="inline-flex items-center rounded-full border border-emerald-300 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-bold text-emerald-900">
+                              কার্নেল
+                            </span>
+                          )}
+                        </div>
+
+                        {/* Recipient & Union */}
+                        <div className="lg:col-span-3 min-w-0">
+                          <div className="font-bold text-slate-900 break-words">{d.recipientName}</div>
+                          <div className="text-[11px] text-slate-500 break-words">{d.unionName}</div>
+                        </div>
+
+                        {/* Desktop Qty */}
+                        <div className="hidden lg:block lg:col-span-1 text-right font-bold">
+                          {isEditing ? (
+                            <input
+                              type="number"
+                              step="0.001"
+                              value={editingDoRow.qty}
+                              onChange={(e) =>
+                                setEditingDoRow((prev) =>
+                                  prev ? { ...prev, qty: e.target.value } : prev
+                                )
                               }
-                              return (
-                                <>
-                                  {(mainNo || mainAmt > 0) && (
-                                    <div>
-                                      মূল: <span className="font-semibold">{mainNo ? toBnDigits(mainNo) : '—'}</span>
-                                      {mainAmt > 0 && (
-                                        <span className="font-bold text-[#E2136E]">
-                                          {' '}(জমা: {formatBnMoney(mainAmt)} ৳)
-                                        </span>
-                                      )}
-                                    </div>
+                              className="w-full rounded border border-slate-300 px-2 py-1 text-right font-bold bg-white"
+                            />
+                          ) : (
+                            `${formatBnQty(d.allocationQty)} মে.টন`
+                          )}
+                        </div>
+
+                        {/* Challans */}
+                        <div className="lg:col-span-3 text-[11px] text-slate-700 space-y-0.5 break-words">
+                          {!mainNo && !taxNo && mainAmt <= 0 && taxAmt <= 0 ? (
+                            <span className="text-slate-400">চালান: —</span>
+                          ) : (
+                            <>
+                              {(mainNo || mainAmt > 0) && (
+                                <div>
+                                  মূল: <span className="font-semibold">{mainNo ? toBnDigits(mainNo) : '—'}</span>
+                                  {mainAmt > 0 && (
+                                    <span className="font-bold text-[#E2136E]">
+                                      {' '}(জমা: {formatBnMoney(mainAmt)} ৳)
+                                    </span>
                                   )}
-                                  {(taxNo || taxAmt > 0) && (
-                                    <div>
-                                      আয়কর: <span className="font-semibold">{taxNo ? toBnDigits(taxNo) : '—'}</span>
-                                      {taxAmt > 0 && (
-                                        <span className="font-bold text-[#E2136E]">
-                                          {' '}(জমা: {formatBnMoney(taxAmt)} ৳)
-                                        </span>
-                                      )}
-                                    </div>
+                                </div>
+                              )}
+                              {(taxNo || taxAmt > 0) && (
+                                <div>
+                                  আয়কর: <span className="font-semibold">{taxNo ? toBnDigits(taxNo) : '—'}</span>
+                                  {taxAmt > 0 && (
+                                    <span className="font-bold text-[#E2136E]">
+                                      {' '}(জমা: {formatBnMoney(taxAmt)} ৳)
+                                    </span>
                                   )}
-                                </>
-                              );
-                            })()}
-                          </td>
-                          <td className="py-2 px-3 text-center whitespace-nowrap">
-                            {isEditing ? (
-                              <div className="inline-flex items-center gap-1">
+                                </div>
+                              )}
+                            </>
+                          )}
+                        </div>
+
+                        {/* Actions */}
+                        <div className="lg:col-span-1 flex items-center justify-end lg:justify-center gap-1 pt-1 lg:pt-0">
+                          {isEditing ? (
+                            <div className="inline-flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (!onUpdateDOIssue) return;
+                                  const res = onUpdateDOIssue(d.id, {
+                                    doNo: editingDoRow.doNo,
+                                    issueDate: editingDoRow.issueDate,
+                                    allocationQty: parseNum(editingDoRow.qty),
+                                  });
+                                  showRes(res);
+                                  if (res.ok) setEditingDoRow(null);
+                                }}
+                                className="min-h-[36px] min-w-[36px] inline-flex items-center justify-center text-white bg-[#E2136E] hover:bg-[#B80D58] rounded-lg cursor-pointer"
+                                title="সংরক্ষণ"
+                              >
+                                <Check className="h-4 w-4" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setEditingDoRow(null)}
+                                className="min-h-[36px] min-w-[36px] inline-flex items-center justify-center text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg cursor-pointer"
+                                title="বাতিল"
+                              >
+                                <X className="h-4 w-4" />
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="inline-flex items-center gap-1.5">
+                              {onUpdateDOIssue && (
                                 <button
                                   type="button"
-                                  onClick={() => {
-                                    if (!onUpdateDOIssue) return;
-                                    const res = onUpdateDOIssue(d.id, {
-                                      doNo: editingDoRow.doNo,
-                                      issueDate: editingDoRow.issueDate,
-                                      allocationQty: parseNum(editingDoRow.qty),
-                                    });
-                                    showRes(res);
-                                    if (res.ok) setEditingDoRow(null);
-                                  }}
-                                  className="p-1.5 text-white bg-[#E2136E] hover:bg-[#B80D58] rounded cursor-pointer"
-                                  title="সংরক্ষণ"
+                                  onClick={() =>
+                                    setEditingDoRow({
+                                      id: d.id,
+                                      doNo: d.doNo,
+                                      issueDate: d.issueDate,
+                                      qty: String(d.allocationQty),
+                                    })
+                                  }
+                                  className="min-h-[36px] min-w-[36px] inline-flex items-center justify-center text-[#E2136E] hover:bg-rose-50 rounded-lg cursor-pointer"
+                                  title="এডিট করুন"
                                 >
-                                  <Check className="h-3.5 w-3.5" />
+                                  <Pencil className="h-4 w-4" />
                                 </button>
-                                <button
-                                  type="button"
-                                  onClick={() => setEditingDoRow(null)}
-                                  className="p-1.5 text-slate-600 bg-slate-100 hover:bg-slate-200 rounded cursor-pointer"
-                                  title="বাতিল"
-                                >
-                                  <X className="h-3.5 w-3.5" />
-                                </button>
-                              </div>
-                            ) : (
-                              <div className="inline-flex items-center gap-1">
-                                {onUpdateDOIssue && (
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      setEditingDoRow({
-                                        id: d.id,
-                                        doNo: d.doNo,
-                                        issueDate: d.issueDate,
-                                        qty: String(d.allocationQty),
-                                      })
-                                    }
-                                    className="p-1.5 text-[#E2136E] hover:bg-rose-50 rounded cursor-pointer"
-                                    title="এডিট করুন"
-                                  >
-                                    <Pencil className="h-3.5 w-3.5" />
-                                  </button>
-                                )}
-                                <button
-                                  type="button"
-                                  onClick={() => onDeleteDOIssue(d.id)}
-                                  className="p-1.5 text-rose-600 hover:bg-rose-50 rounded cursor-pointer"
-                                  title="মুছুন"
-                                >
-                                  <Trash2 className="h-3.5 w-3.5" />
-                                </button>
-                              </div>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })
-                  )}
-                </tbody>
-              </table>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => onDeleteDOIssue(d.id)}
+                                className="min-h-[36px] min-w-[36px] inline-flex items-center justify-center text-rose-600 hover:bg-rose-50 rounded-lg cursor-pointer"
+                                title="মুছুন"
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
             </div>
           </div>
         </div>
@@ -1249,4 +1273,6 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
     </div>
   );
 };
+
+
 

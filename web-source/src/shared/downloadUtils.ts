@@ -39,3 +39,5 @@ export function triggerBlobDownload(blob: Blob, fileName: string): void {
   }, 15000);
 }
 
+
+

@@ -466,3 +466,5 @@ export const KernelEntryView: React.FC<KernelEntryViewProps> = ({
     </div>
   );
 };
+
+

@@ -89,6 +89,7 @@ export interface OfficialA4DocumentProps {
   onEditTemplate?: () => void;
   toolbarExtra?: React.ReactNode;
   hideDefaultToolbar?: boolean;
+  compactSinglePage?: boolean;
 }
 
 interface PageSlice {
@@ -115,7 +116,7 @@ const MM_TO_PX = 3.7795275591;
 function clampMm(v: number, fallback = 10): number {
   const n = Number(v);
   if (!Number.isFinite(n)) return fallback;
-  return Math.max(4, Math.min(30, n));
+  return Math.max(2, Math.min(35, n));
 }
 
 function getGroupColSpans(columns: DocColumnGroup[]): {
@@ -250,6 +251,7 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
       onEditTemplate,
       toolbarExtra,
       hideDefaultToolbar = false,
+      compactSinglePage = false,
     },
     ref
   ) => {
@@ -388,15 +390,15 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
       },
     ]);
 
-    const fontPt = Math.max(7.5, Math.min(13, Number(template.fontSizePt) || 9.5));
+    const fontPt = Math.max(6, Math.min(16, Number(template.fontSizePt) || 9.5));
     const sigSrc = officer.signatureImageUrl || '/default-signature.png';
     const fallbackSigHeight =
       template.kind === 'register'
         ? (officer.registerSignatureHeightPx ?? 26)
         : (officer.reportSignatureHeightPx ?? 38);
     const sigHeight = Math.max(
-      14,
-      Math.min(90, Number(template.signatureHeightPx) || fallbackSigHeight)
+      10,
+      Math.min(120, Number(template.signatureHeightPx) || fallbackSigHeight)
     );
 
     const uniqueMergedCells = useMemo(() => {
@@ -627,6 +629,8 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
       padBottomPx,
       contentWidthPx,
       fontPt,
+      sigHeight,
+      compactSinglePage,
       fontReadyTick,
       showRecipientBlock,
       showIntroBlock,
@@ -730,6 +734,11 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
                   letter-spacing: 0 !important;
                   line-height: 1.38 !important;
                 }
+                .official-table--compact th,
+                .official-table--compact td {
+                  padding: 2.5px 2.5px !important;
+                  line-height: 1.24 !important;
+                }
               `;
               clonedDoc.head.appendChild(fixStyle);
               clonedDoc.body.replaceChildren(clonedNode);
@@ -768,7 +777,7 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
 
     const renderHeaderBlock = () => (
       <div data-measure="doc-header" style={{ display: 'flow-root' }} className="text-slate-950 font-nikosh">
-        <div className="text-center leading-snug mb-2">
+        <div className={`text-center leading-snug ${compactSinglePage ? 'mb-1' : 'mb-2'}`}>
           {template.govLine && (
             <div style={{ fontSize: `${fontPt + 0.5}pt` }} className="font-bold">
               {toBnDigits(template.govLine)}
@@ -790,7 +799,7 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
           {template.reportTitle && (
             <div
               style={{ fontSize: `${fontPt + 1.5}pt` }}
-              className="font-bold mt-1.5 inline-block border-b border-slate-800 px-3 pb-0.5"
+              className={`font-bold ${compactSinglePage ? 'mt-0.5' : 'mt-1.5'} inline-block border-b border-slate-800 px-3 pb-0.5`}
             >
               {toBnDigits(template.reportTitle)}
             </div>
@@ -800,7 +809,9 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
         {(showRecipientBlock || memoNo !== undefined) && (
           <div
             style={{ fontSize: `${fontPt}pt` }}
-            className="flex justify-between items-baseline border-b border-slate-300 pb-1 mb-2"
+            className={`flex justify-between items-baseline border-b border-slate-300 ${
+              compactSinglePage ? 'pb-0.5 mb-1' : 'pb-1 mb-2'
+            }`}
           >
             <div>
               <span className="font-semibold">{template.memoLabel}</span>
@@ -814,7 +825,7 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
         )}
 
         {(subjectResolved || template.subject) && (
-          <div style={{ fontSize: `${fontPt}pt` }} className="mb-1.5 leading-snug">
+          <div style={{ fontSize: `${fontPt}pt` }} className={`${compactSinglePage ? 'mb-1' : 'mb-1.5'} leading-snug`}>
             <span className="font-bold">বিষয়ঃ </span>
             <span>{toBnDigits(subjectResolved || template.subject)}</span>
           </div>
@@ -823,7 +834,7 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
         {showIntroBlock && (introResolved || template.introText) && (
           <div
             style={{ fontSize: `${fontPt}pt` }}
-            className="mb-2 leading-snug text-justify whitespace-pre-line"
+            className={`${compactSinglePage ? 'mb-1' : 'mb-2'} leading-snug text-justify whitespace-pre-line`}
           >
             {toBnDigits(introResolved || template.introText)}
           </div>
@@ -838,7 +849,7 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
             <th
               rowSpan={headerStruct.hasTwoHeaderRows ? 2 : 1}
               style={{
-                fontSize: `${Math.max(8, fontPt - 0.5)}pt`,
+                fontSize: `${Math.max(6.5, fontPt - 0.5)}pt`,
                 whiteSpace: 'pre-line',
                 ...(resolvedColWidths ? {} : { width: '36px' }),
               }}
@@ -852,7 +863,7 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
               colSpan={tc.colSpan}
               rowSpan={tc.rowSpan}
               style={{
-                fontSize: `${Math.max(8, fontPt - 0.5)}pt`,
+                fontSize: `${Math.max(6.5, fontPt - 0.5)}pt`,
                 whiteSpace: 'pre-line',
               }}
             >
@@ -866,7 +877,7 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
               <th
                 key={`sub-${sc.key}-${i}`}
                 style={{
-                  fontSize: `${Math.max(7.5, fontPt - 1)}pt`,
+                  fontSize: `${Math.max(6, fontPt - 1)}pt`,
                   whiteSpace: 'pre-line',
                 }}
               >
@@ -906,7 +917,7 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
                 crossOrigin="anonymous"
                 style={{
                   maxHeight: `${sigHeight}px`,
-                  maxWidth: `${Math.max(150, Math.min(250, Math.round(sigHeight * 4.4)))}px`,
+                  maxWidth: `${Math.max(150, Math.min(280, Math.round(sigHeight * 4.4)))}px`,
                   objectFit: 'contain',
                 }}
               />
@@ -999,10 +1010,10 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
         <div
           {...(isMeasure ? { 'data-measure': 'footer' } : {})}
           style={{ fontSize: `${fontPt}pt` }}
-          className="mt-4 pt-2 font-nikosh text-slate-950"
+          className={`${compactSinglePage ? 'mt-2 pt-1' : 'mt-4 pt-2'} font-nikosh text-slate-950`}
         >
           {showCopyArea ? (
-            <div className="space-y-3">
+            <div className={compactSinglePage ? 'space-y-1.5' : 'space-y-3'}>
               {sigAndRecipientRow}
               {copyBox}
             </div>
@@ -1131,9 +1142,9 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
 
       return (
         <table
-          className="official-table"
+          className={`official-table${compactSinglePage ? ' official-table--compact' : ''}`}
           style={{
-            fontSize: `${Math.max(7.5, fontPt - 0.5)}pt`,
+            fontSize: `${Math.max(6.5, fontPt - 0.5)}pt`,
             ...(tableLayoutFixed && resolvedColWidths ? { tableLayout: 'fixed' } : {}),
           }}
         >
@@ -1228,7 +1239,9 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
                               ? 'text-center'
                               : 'text-left'
                         }
-                        style={{ whiteSpace: 'pre-line' }}
+                        style={{
+                          whiteSpace: compactSinglePage ? 'nowrap' : 'pre-line',
+                        }}
                       >
                         {toBnDigits(row.cells[leaf.key] ?? '—')}
                       </td>
@@ -1260,6 +1273,7 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
                             ? 'text-center'
                             : 'text-left'
                       }
+                      style={compactSinglePage ? { whiteSpace: 'nowrap' } : undefined}
                     >
                       {toBnDigits(totalRow.values[leaf.key] ?? '')}
                     </td>
@@ -1424,10 +1438,10 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
             <span>{toBnDigits(template.office1)}</span>
           </div>
           <table
-            className="official-table"
+            className={`official-table${compactSinglePage ? ' official-table--compact' : ''}`}
             style={{
               width: `${contentWidthPx}px`,
-              fontSize: `${Math.max(7.5, fontPt - 0.5)}pt`,
+              fontSize: `${Math.max(6.5, fontPt - 0.5)}pt`,
               ...(tableLayoutFixed && resolvedColWidths ? { tableLayout: 'fixed' } : {}),
             }}
           >
@@ -1443,7 +1457,7 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
                     <td
                       key={leaf.key}
                       style={{
-                        whiteSpace: 'pre-line',
+                        whiteSpace: compactSinglePage && leafIdx >= effectiveMergeDepth && !leaf.isSignature ? 'nowrap' : 'pre-line',
                         ...(leaf.isSignature
                           ? {
                               minWidth: `${Math.max(isLandscape ? 76 : 56, Math.round(sigHeight * 2.8))}px`,
@@ -1474,7 +1488,12 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
                     </td>
                   )}
                   {visibleLeaves.slice(Math.max(0, filteredLabelColSpan)).map((leaf) => (
-                    <td key={leaf.key}>{toBnDigits(totalRow.values[leaf.key] ?? '')}</td>
+                    <td
+                      key={leaf.key}
+                      style={compactSinglePage ? { whiteSpace: 'nowrap' } : undefined}
+                    >
+                      {toBnDigits(totalRow.values[leaf.key] ?? '')}
+                    </td>
                   ))}
                 </tr>
               )}
@@ -1482,10 +1501,10 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
           </table>
           {uniqueMergedCells.length > 0 && (
             <table
-              className="official-table"
+              className={`official-table${compactSinglePage ? ' official-table--compact' : ''}`}
               style={{
                 width: `${contentWidthPx}px`,
-                fontSize: `${Math.max(7.5, fontPt - 0.5)}pt`,
+                fontSize: `${Math.max(6.5, fontPt - 0.5)}pt`,
                 ...(tableLayoutFixed && resolvedColWidths ? { tableLayout: 'fixed' } : {}),
               }}
             >
@@ -1599,4 +1618,6 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
 );
 
 OfficialA4Document.displayName = 'OfficialA4Document';
+
+
 

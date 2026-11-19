@@ -342,3 +342,5 @@ export function generateFoodGrainPngIcon(options: PngIconOptions): Buffer {
 }
 
 export const generateChallanPngIcon = generateFoodGrainPngIcon;
+
+

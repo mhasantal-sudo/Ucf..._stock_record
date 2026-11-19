@@ -1526,6 +1526,39 @@ export function useAllocationStore() {
         deletedChallanKeysRef.current.delete(`${normNo}::${input.challanType}`);
         persistDeletedChallanKeys(deletedChallanKeysRef.current);
       }
+
+      // Preserve same-row pairing (sourceRowId / dealerAllocationId) when linking tax challan to an existing DO or main challan
+      const pairedTargetDo = targetDoNo
+        ? db.doIssues.find((d) => normMemoNo(d.doNo) === normMemoNo(targetDoNo))
+        : undefined;
+      const counterpartType: ChallanRecord['challanType'] =
+        input.challanType === 'আয়কর চালান' ? 'মূল চালান' : 'আয়কর চালান';
+      const pairedCounterpart = db.challans.find(
+        (c) =>
+          c.challanType === counterpartType &&
+          c.category === input.category &&
+          isSamePartyName(c.dealerName, input.dealerName) &&
+          ((targetDoNo && c.doNo && normMemoNo(c.doNo) === normMemoNo(targetDoNo)) ||
+            (input.dealerAllocationId &&
+              c.dealerAllocationId &&
+              normMemoNo(c.dealerAllocationId) === normMemoNo(input.dealerAllocationId)) ||
+            (pairedTargetDo?.dealerAllocationId &&
+              c.dealerAllocationId &&
+              normMemoNo(c.dealerAllocationId) === normMemoNo(pairedTargetDo.dealerAllocationId)))
+      );
+      const inheritedSourceRowId =
+        input.sourceRowId ||
+        existingRec?.sourceRowId ||
+        pairedCounterpart?.sourceRowId ||
+        (pairedCounterpart && !pairedCounterpart.id.startsWith('ch-ext-t-')
+          ? pairedCounterpart.id
+          : undefined);
+      const inheritedSubId =
+        input.dealerAllocationId ||
+        existingRec?.dealerAllocationId ||
+        pairedTargetDo?.dealerAllocationId ||
+        pairedCounterpart?.dealerAllocationId;
+
       if (existingId) {
         setDb((prev) =>
           reconcileChallansAndDOs({
@@ -1535,6 +1568,8 @@ export function useAllocationStore() {
                 ? {
                     ...c,
                     ...input,
+                    sourceRowId: inheritedSourceRowId ?? c.sourceRowId,
+                    dealerAllocationId: inheritedSubId ?? c.dealerAllocationId,
                     challanNo: input.challanNo.trim(),
                     recordedAmount: round2(input.recordedAmount),
                     depositedAmount: round2(input.depositedAmount),
@@ -1547,6 +1582,8 @@ export function useAllocationStore() {
       }
       const row: ChallanRecord = {
         ...input,
+        sourceRowId: inheritedSourceRowId,
+        dealerAllocationId: inheritedSubId,
         challanNo: input.challanNo.trim(),
         recordedAmount: round2(input.recordedAmount),
         depositedAmount: round2(input.depositedAmount),
@@ -3097,4 +3134,6 @@ export function useAllocationStore() {
     clearAllLocalData,
   };
 }
+
+
 

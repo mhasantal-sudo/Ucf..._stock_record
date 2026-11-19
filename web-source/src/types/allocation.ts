@@ -353,6 +353,7 @@ export interface DOBook {
 
 export interface ChallanRecord {
   id: string;
+  sourceRowId?: string;
   challanNo: string;
   challanDate: string;
   category: AllocationCategory;
@@ -685,4 +686,6 @@ export function createDefaultTemplatesMap(
   }
   return map;
 }
+
+
 

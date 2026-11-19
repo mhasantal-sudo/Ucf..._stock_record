@@ -1332,6 +1332,7 @@ export function reconcileChallansAndDOs(db: AllocationDatabase): AllocationDatab
   const usedChallanNoType = new Set<string>();
   const matchedDoByChallanId = new Map<string, DOIssue>();
   const matchedMainByDoId = new Map<string, ChallanRecord>();
+  const matchedMainSourceRowByDoId = new Map<string, string>();
   const matchedTaxByDoId = new Map<string, ChallanRecord>();
 
   // Strict 1-to-1 chronological matching:
@@ -1344,6 +1345,7 @@ export function reconcileChallansAndDOs(db: AllocationDatabase): AllocationDatab
       if (isKernelDo(d)) continue;
       const dIso = toIsoDateStr(d.issueDate);
       const targetDoChallanNo = type === 'মূল চালান' ? d.challanNo : d.taxChallanNo;
+      const pairedMainSourceRow = type === 'আয়কর চালান' ? matchedMainSourceRowByDoId.get(d.id) : undefined;
 
       const candidates = preNormalizedChallans.filter((c) => {
         if (c.challanType !== type) return false;
@@ -1379,6 +1381,12 @@ export function reconcileChallansAndDOs(db: AllocationDatabase): AllocationDatab
       if (candidates.length === 0) continue;
 
       candidates.sort((a, b) => {
+        if (pairedMainSourceRow) {
+          const aSameRow = a.sourceRowId && a.sourceRowId === pairedMainSourceRow ? 0 : 1;
+          const bSameRow = b.sourceRowId && b.sourceRowId === pairedMainSourceRow ? 0 : 1;
+          if (aSameRow !== bSameRow) return aSameRow - bSameRow;
+        }
+
         const aIso = toIsoDateStr(a.challanDate);
         const bIso = toIsoDateStr(b.challanDate);
         if (Boolean(aIso) !== Boolean(bIso)) return aIso ? -1 : 1;
@@ -1420,8 +1428,13 @@ export function reconcileChallansAndDOs(db: AllocationDatabase): AllocationDatab
       const bestKey = normChallanNo(best.challanNo);
       if (bestKey) usedChallanNoType.add(`${bestKey}::${type}`);
       matchedDoByChallanId.set(best.id, d);
-      if (type === 'মূল চালান') matchedMainByDoId.set(d.id, best);
-      else matchedTaxByDoId.set(d.id, best);
+      if (type === 'মূল চালান') {
+        matchedMainByDoId.set(d.id, best);
+        const srid = best.sourceRowId || (!best.id.startsWith('ch-ext-') && !best.id.startsWith('ch-rec-') ? best.id : '');
+        if (srid) matchedMainSourceRowByDoId.set(d.id, srid);
+      } else {
+        matchedTaxByDoId.set(d.id, best);
+      }
     }
   }
 
@@ -1896,6 +1909,9 @@ export function deduplicateChallanRecords(challans: ChallanRecord[]): ChallanRec
     if (Boolean(candidate.dealerAllocationId) !== Boolean(existing.dealerAllocationId)) {
       return Boolean(candidate.dealerAllocationId);
     }
+    if (Boolean(candidate.sourceRowId) !== Boolean(existing.sourceRowId)) {
+      return Boolean(candidate.sourceRowId);
+    }
     if (candidate.depositedAmount !== existing.depositedAmount) {
       return candidate.depositedAmount > existing.depositedAmount;
     }
@@ -1916,6 +1932,7 @@ export function deduplicateChallanRecords(challans: ChallanRecord[]): ChallanRec
         : winner.challanNo;
     return {
       ...winner,
+      sourceRowId: winner.sourceRowId || loser.sourceRowId,
       challanNo: preservedNo,
       challanDate: winner.challanDate || loser.challanDate,
       dealerName: winner.dealerName && winner.dealerName !== '—' ? winner.dealerName : loser.dealerName,
@@ -2234,15 +2251,17 @@ export function parseChallanRowsFromTable(rows: unknown[][], workbookPreferMdy =
   const seenIds = new Set<string>();
 
   challanRows.forEach((r, i) => {
-    const dealerName = pickField(r, [
+    const note = pickField(r, ['Note', 'note', 'remarks', 'comment', 'মন্তব্য']);
+    const rawDealerName = pickField(r, [
       'Dealer_Name', 'dealerName', 'dealer', 'Dealer',
       'Recipient_Name', 'recipientName', 'recipient', 'partyName', 'party', 'name',
       'ডিলার', 'ডিলারের নাম', 'প্রাপক', 'প্রাপকের নাম', 'প্রতিষ্ঠান', 'নাম',
     ]);
+    const commentPartyMatch = note.match(/প্রদানকারী\s*[:ঃ]\s*([^|\n]+)/);
+    const dealerName = rawDealerName || (commentPartyMatch ? commentPartyMatch[1].trim() : '');
     const dealerAllocationId = pickField(r, [
       'dealerAllocationId', 'dealer_allocation_id', 'suballocationId', 'allocationId',
     ]);
-    const note = pickField(r, ['Note', 'note', 'remarks', 'comment', 'মন্তব্য']);
     const baseCategory = normalizeCategoryName(
       pickField(r, CATEGORY_FIELD_KEYS),
       `${dealerName} ${note}`
@@ -2303,14 +2322,15 @@ export function parseChallanRowsFromTable(rows: unknown[][], workbookPreferMdy =
     const parsedQty = qty > 0 ? round3(qty) : undefined;
     const rawRowId = pickField(r, ['ID', 'id']);
 
-    // Case A: Row has BOTH explicit main + tax challan columns -> split cleanly into 2 records
-    if (taxNoExplicit && (mainNo || depMain > 0)) {
+    // Case A: Row has BOTH explicit main + tax challan columns -> parse cleanly into paired records referencing same sourceRowId
+    if ((taxNoExplicit || depTax > 0) && (mainNo || depMain > 0)) {
       if (mainNo || dealerName || dealerAllocationId) {
         const mId = rawRowId
           ? makeUniqueId(rawRowId, 'ch-ext-m', i, seenIds)
           : makeDeterministicChallanId('ch-ext-m', 'মূল চালান', mainNo, mainDate, dealerName, baseCategory, i, seenIds);
         out.push({
           id: mId,
+          sourceRowId: rawRowId || undefined,
           challanNo: mainNo,
           challanDate: mainDate,
           category: baseCategory,
@@ -2328,8 +2348,8 @@ export function parseChallanRowsFromTable(rows: unknown[][], workbookPreferMdy =
         });
       }
       const sameAsMainNo =
-        Boolean(mainNo) && normChallanNo(taxNoExplicit) === normChallanNo(mainNo);
-      if (!sameAsMainNo || depTax > 0) {
+        Boolean(mainNo) && Boolean(taxNoExplicit) && normChallanNo(taxNoExplicit) === normChallanNo(mainNo);
+      if (taxNoExplicit && (!sameAsMainNo || depTax > 0)) {
         const tId = makeDeterministicChallanId(
           'ch-ext-t',
           'আয়কর চালান',
@@ -2342,6 +2362,7 @@ export function parseChallanRowsFromTable(rows: unknown[][], workbookPreferMdy =
         );
         out.push({
           id: tId,
+          sourceRowId: rawRowId || undefined,
           challanNo: taxNoExplicit,
           challanDate: taxDate,
           category: baseCategory,
@@ -2370,7 +2391,7 @@ export function parseChallanRowsFromTable(rows: unknown[][], workbookPreferMdy =
       rawType.includes('আয়কর') ||
       rawType.toLowerCase().includes('tax') ||
       rawType.toLowerCase().includes('vat') ||
-      (!mainNo && Boolean(taxNoExplicit));
+      (!mainNo && (Boolean(taxNoExplicit) || depTax > 0));
 
     const cType: ChallanRecord['challanType'] = isTax ? 'আয়কর চালান' : 'মূল চালান';
     const cDate = isTax ? taxDate : mainDate;
@@ -2380,6 +2401,7 @@ export function parseChallanRowsFromTable(rows: unknown[][], workbookPreferMdy =
 
     out.push({
       id: cId,
+      sourceRowId: rawRowId || undefined,
       challanNo: finalNo,
       challanDate: cDate,
       category: baseCategory,
@@ -2871,6 +2893,214 @@ export interface BuiltSheetTabPayload {
   columnAliases: Record<string, string[]>;
   grainValues?: string[];
   rows: Array<Array<string | number>>;
+  combinedColumnAliases?: Record<string, string[]>;
+  combinedRows?: Array<Array<string | number>>;
+}
+
+const COMBINED_CHALLAN_HEADERS = [
+  'challanNo',
+  'challanDate',
+  'category',
+  'dealerName',
+  'bankName',
+  'doNo',
+  'recordedAmount',
+  'depositedAmount',
+  'taxChallanNo',
+  'taxChallanDate',
+  'taxChallanAmount',
+  'requiredTaxAmount',
+  'rate',
+  'note',
+  'createdAt',
+  'dealerAllocationId',
+  'doDate',
+  'allocationQty',
+  'id',
+] as const;
+
+const COMBINED_CHALLAN_COLUMN_ALIASES: Record<string, string[]> = {
+  ...TAB_COLUMN_ALIASES.challans,
+  taxChallanNo: [
+    'taxchallanno', 'incometaxchallanno', 'taxchallannumber', 'incometaxchallannumber',
+    'আয়করচালাননং', 'আয়করচালান', 'ভ্যাটআয়করচালান', 'ট্যাক্সচালান',
+  ],
+  taxChallanDate: [
+    'taxchallandate', 'incometaxdate', 'incometaxchallandate',
+    'আয়করতারিখ', 'আয়করচালানেরতারিখ',
+  ],
+  taxChallanAmount: [
+    'taxchallanamount', 'incometaxamount', 'taxamount', 'depositedtaxamount',
+    'আয়করটাকা', 'আয়করেরপরিমাণ',
+  ],
+  requiredTaxAmount: ['requiredtaxamount', 'recordedtaxamount', 'রেকর্ডআয়কর'],
+  rate: ['rate', 'unitprice', 'দর'],
+};
+
+const COMBINED_CHALLAN_DETECT_TOKENS = new Set([
+  'taxchallanno', 'incometaxchallanno', 'taxchallannumber', 'incometaxchallannumber',
+  'আয়করচালাননং', 'আয়করচালান', 'ভ্যাটআয়করচালান', 'ট্যাক্সচালান',
+  'taxchallandate', 'incometaxdate', 'incometaxchallandate', 'আয়করতারিখ', 'আয়করচালানেরতারিখ',
+  'taxchallanamount', 'incometaxamount', 'taxamount', 'depositedtaxamount', 'আয়করটাকা', 'আয়করেরপরিমাণ',
+  'requiredtaxamount', 'recordedtaxamount', 'রেকর্ডআয়কর',
+]);
+
+function combineChallansForCombinedSheet(
+  challans: ChallanRecord[],
+  rates: CategoryRate[]
+): Array<Array<string | number>> {
+  const sorted = sortChallansCleanly(deduplicateChallanRecords(challans));
+  const mains = sorted.filter((c) => c.challanType === 'মূল চালান');
+  const taxes = sorted.filter((c) => c.challanType === 'আয়কর চালান');
+  const rateByCat = new Map(rates.map((r) => [r.category, r.unitPrice]));
+
+  const pairedTaxByMainIdx = new Map<number, ChallanRecord>();
+  const usedMainIndices = new Set<number>();
+  const usedTaxIndices = new Set<number>();
+
+  const claimPair = (tIdx: number, mIdx: number) => {
+    usedTaxIndices.add(tIdx);
+    usedMainIndices.add(mIdx);
+    pairedTaxByMainIdx.set(mIdx, taxes[tIdx]);
+  };
+
+  const compatibleParty = (m: ChallanRecord, t: ChallanRecord): boolean => {
+    if (m.category !== t.category) return false;
+    if (!m.dealerName || !t.dealerName) return true;
+    return isSamePartyName(m.dealerName, t.dealerName);
+  };
+
+  // Pass 1: Match by explicit sourceRowId (exact combined Google Sheet row ID e.g. CHL-...)
+  taxes.forEach((t, tIdx) => {
+    if (usedTaxIndices.has(tIdx) || !t.sourceRowId) return;
+    const mIdx = mains.findIndex(
+      (m, idx) =>
+        !usedMainIndices.has(idx) &&
+        compatibleParty(m, t) &&
+        (m.id === t.sourceRowId || m.sourceRowId === t.sourceRowId)
+    );
+    if (mIdx >= 0) claimPair(tIdx, mIdx);
+  });
+
+  // Pass 2: Match by explicit dealerAllocationId
+  taxes.forEach((t, tIdx) => {
+    if (usedTaxIndices.has(tIdx) || !t.dealerAllocationId) return;
+    const tSub = normMemoNo(t.dealerAllocationId);
+    const mIdx = mains.findIndex(
+      (m, idx) =>
+        !usedMainIndices.has(idx) &&
+        compatibleParty(m, t) &&
+        Boolean(m.dealerAllocationId) &&
+        normMemoNo(m.dealerAllocationId) === tSub
+    );
+    if (mIdx >= 0) claimPair(tIdx, mIdx);
+  });
+
+  // Pass 3: Match by explicit linked doNo
+  taxes.forEach((t, tIdx) => {
+    if (usedTaxIndices.has(tIdx) || !t.doNo) return;
+    const tDo = normMemoNo(t.doNo);
+    const mIdx = mains.findIndex(
+      (m, idx) =>
+        !usedMainIndices.has(idx) &&
+        compatibleParty(m, t) &&
+        Boolean(m.doNo) &&
+        normMemoNo(m.doNo) === tDo
+    );
+    if (mIdx >= 0) claimPair(tIdx, mIdx);
+  });
+
+  // Pass 4: Match by same category + same dealer + same date (and qty proximity)
+  taxes.forEach((t, tIdx) => {
+    if (usedTaxIndices.has(tIdx)) return;
+    const tIso = toIsoDateStr(t.challanDate);
+    if (!tIso || !t.dealerName) return;
+    let bestIdx = -1;
+    let bestDiff = Number.MAX_VALUE;
+    mains.forEach((m, idx) => {
+      if (usedMainIndices.has(idx) || !compatibleParty(m, t)) return;
+      if (t.doNo && m.doNo && normMemoNo(t.doNo) !== normMemoNo(m.doNo)) return;
+      if (toIsoDateStr(m.challanDate) !== tIso) return;
+      const qDiff =
+        t.allocationQty && m.allocationQty ? Math.abs(t.allocationQty - m.allocationQty) : 0;
+      if (qDiff < bestDiff) {
+        bestDiff = qDiff;
+        bestIdx = idx;
+      }
+    });
+    if (bestIdx >= 0) claimPair(tIdx, bestIdx);
+  });
+
+  // Pass 5: Nearest unpaired main challan for same dealer & category within 31 days without doNo conflict
+  taxes.forEach((t, tIdx) => {
+    if (usedTaxIndices.has(tIdx) || !t.dealerName) return;
+    const tIso = toIsoDateStr(t.challanDate);
+    const tTime = tIso ? Date.parse(tIso) : NaN;
+    let bestIdx = -1;
+    let bestDays = 32;
+    mains.forEach((m, idx) => {
+      if (usedMainIndices.has(idx) || !compatibleParty(m, t)) return;
+      if (t.doNo && m.doNo && normMemoNo(t.doNo) !== normMemoNo(m.doNo)) return;
+      const mIso = toIsoDateStr(m.challanDate);
+      const mTime = mIso ? Date.parse(mIso) : NaN;
+      const daysDiff =
+        Number.isFinite(tTime) && Number.isFinite(mTime)
+          ? Math.abs(tTime - mTime) / 86400000
+          : t.allocationQty && m.allocationQty && Math.abs(t.allocationQty - m.allocationQty) < 0.02
+            ? 0
+            : 999;
+      if (daysDiff < bestDays) {
+        bestDays = daysDiff;
+        bestIdx = idx;
+      }
+    });
+    if (bestIdx >= 0) claimPair(tIdx, bestIdx);
+  });
+
+  const makeRow = (m: ChallanRecord | null, t: ChallanRecord | null): Array<string | number> => {
+    const primary = m || t!;
+    const cat = primary.category;
+    const qtyVal = m?.allocationQty ?? t?.allocationQty ?? '';
+    const unitRate = rateByCat.get(cat) || (cat === 'খাদ্য বান্ধব' ? 13000 : 0);
+    const computedRate =
+      typeof qtyVal === 'number' && qtyVal > 0 && m && m.recordedAmount > 0
+        ? round2(m.recordedAmount / qtyVal)
+        : unitRate || '';
+    const rowId = m?.sourceRowId || m?.id || t?.sourceRowId || t?.id || '';
+    return [
+      m?.challanNo ?? '',
+      toCleanIsoDate(m?.challanDate ?? ''),
+      cat,
+      primary.dealerName,
+      m?.bankName || t?.bankName || '',
+      m?.doNo || t?.doNo || '',
+      m?.recordedAmount ?? '',
+      m?.depositedAmount ?? '',
+      t?.challanNo ?? '',
+      toCleanIsoDate(t?.challanDate ?? ''),
+      t?.depositedAmount ?? '',
+      t?.recordedAmount ?? '',
+      computedRate,
+      m?.note || t?.note || '',
+      primary.createdAt,
+      m?.dealerAllocationId || t?.dealerAllocationId || '',
+      toCleanIsoDate(m?.doDate || t?.doDate || ''),
+      qtyVal,
+      rowId,
+    ];
+  };
+
+  const outRows: Array<Array<string | number>> = [];
+  mains.forEach((m, idx) => {
+    outRows.push(makeRow(m, pairedTaxByMainIdx.get(idx) || null));
+  });
+  taxes.forEach((t, tIdx) => {
+    if (!usedTaxIndices.has(tIdx)) {
+      outRows.push(makeRow(null, t));
+    }
+  });
+
+  return [[...COMBINED_CHALLAN_HEADERS], ...outRows];
 }
 
 function toCleanIsoDate(val: unknown): string {
@@ -2988,52 +3218,113 @@ export function projectPayloadRowsForExistingSheet(
   }
 
   const existingHeaders = rawHeaderRow.map((h) => String(h ?? '').trim());
+  const useCombinedChallan =
+    payload.key === 'challans' &&
+    Boolean(payload.combinedRows && payload.combinedColumnAliases) &&
+    existingHeaders.some((h) => COMBINED_CHALLAN_DETECT_TOKENS.has(normColKey(h)));
+
+  const activeRows = useCombinedChallan && payload.combinedRows ? payload.combinedRows : payload.rows;
+  const activeHeaders = (activeRows[0] || []).map((h) => String(h));
+  const activeAliasesMap =
+    useCombinedChallan && payload.combinedColumnAliases
+      ? payload.combinedColumnAliases
+      : payload.columnAliases;
+
+  const activeAliasToIncomingIdx = new Map<string, number>();
+  activeHeaders.forEach((h, idx) => {
+    const nh = normColKey(h);
+    if (nh && !activeAliasToIncomingIdx.has(nh)) activeAliasToIncomingIdx.set(nh, idx);
+    const aliases = activeAliasesMap[h] || activeAliasesMap[nh] || [];
+    for (const a of aliases) {
+      const na = normColKey(a);
+      if (na && !activeAliasToIncomingIdx.has(na)) activeAliasToIncomingIdx.set(na, idx);
+    }
+  });
+
   const oldDefault = OLD_APP_ID_FIRST_HEADERS[payload.key];
   if (
+    !useCombinedChallan &&
     oldDefault &&
     existingHeaders.length === oldDefault.length &&
     existingHeaders.every((h, idx) => normColKey(h) === normColKey(oldDefault[idx]))
   ) {
     // Upgrade legacy app-generated id-first header layout to id-last (matching DO_Issue)
-    return { startRow: headerRowIdx + 1, rows: payload.rows };
+    return { startRow: headerRowIdx + 1, rows: activeRows };
   }
 
-  const idIncomingIdx = incomingHeaders.findIndex((h) => normColKey(h) === 'id');
+  const idIncomingIdx = activeHeaders.findIndex((h) => normColKey(h) === 'id');
   const challanTypeIncomingIdx =
-    payload.key === 'challans'
-      ? incomingHeaders.findIndex((h) => normColKey(h) === 'challantype')
+    payload.key === 'challans' && !useCombinedChallan
+      ? activeHeaders.findIndex((h) => normColKey(h) === 'challantype')
       : -1;
   const dateIncomingIdx = payload.dateFieldKey
-    ? incomingHeaders.findIndex((h) => normColKey(h) === normColKey(payload.dateFieldKey))
+    ? activeHeaders.findIndex((h) => normColKey(h) === normColKey(payload.dateFieldKey))
     : -1;
-  const hasIdCol = existingHeaders.some((h) => aliasToIncomingIdx.get(normColKey(h)) === idIncomingIdx);
+  const mainChallanNoIncomingIdx =
+    payload.key === 'challans'
+      ? activeHeaders.findIndex((h) => normColKey(h) === 'challanno')
+      : -1;
+  const taxChallanNoIncomingIdx =
+    payload.key === 'challans' && useCombinedChallan
+      ? activeHeaders.findIndex((h) => normColKey(h) === 'taxchallanno')
+      : -1;
+
+  const hasIdCol = existingHeaders.some(
+    (h) => activeAliasToIncomingIdx.get(normColKey(h)) === idIncomingIdx
+  );
   const hasChallanTypeCol =
     challanTypeIncomingIdx >= 0 &&
-    existingHeaders.some((h) => aliasToIncomingIdx.get(normColKey(h)) === challanTypeIncomingIdx);
+    existingHeaders.some((h) => activeAliasToIncomingIdx.get(normColKey(h)) === challanTypeIncomingIdx);
   const needsChallanTypeCol =
     payload.key === 'challans' &&
+    !useCombinedChallan &&
     challanTypeIncomingIdx >= 0 &&
     !hasChallanTypeCol &&
-    payload.rows.slice(1).some((r) => String(r[challanTypeIncomingIdx] ?? '').includes('আয়কর'));
+    activeRows.slice(1).some((r) => String(r[challanTypeIncomingIdx] ?? '').includes('আয়কর'));
   const targetHeaders = [...existingHeaders];
   if (!hasIdCol && idIncomingIdx >= 0) targetHeaders.push('id');
   if (needsChallanTypeCol) targetHeaders.push('challanType');
 
   // Gather existing data rows for preserving custom unknown columns, FY style, and status/constant defaults
   const oldRowsById = new Map<string, unknown[]>();
-  const existingIdCol = existingHeaders.findIndex((h) => aliasToIncomingIdx.get(normColKey(h)) === idIncomingIdx);
+  const oldRowsByChallanNo = new Map<string, unknown[]>();
+  const existingIdCol = existingHeaders.findIndex(
+    (h) => activeAliasToIncomingIdx.get(normColKey(h)) === idIncomingIdx
+  );
+  const existingChallanNoCol =
+    payload.key === 'challans' && mainChallanNoIncomingIdx >= 0
+      ? existingHeaders.findIndex(
+          (h) => activeAliasToIncomingIdx.get(normColKey(h)) === mainChallanNoIncomingIdx
+        )
+      : -1;
+  const existingTaxNoCol =
+    payload.key === 'challans' && taxChallanNoIncomingIdx >= 0
+      ? existingHeaders.findIndex(
+          (h) => activeAliasToIncomingIdx.get(normColKey(h)) === taxChallanNoIncomingIdx
+        )
+      : -1;
+
   let fySampleStyle = '';
   const colModeMap = new Map<number, string>();
   const fyColTokens = ['fiscalyear', 'fy', 'session', 'অর্থবছর'];
   const slColTokens = ['sl', 'slno', 'serial', 'serialno', 'ক্রমিক', 'ক্রম'];
   const grainColTokens = ['grain', 'commodity', 'item', 'foodgrain', 'শস্য', 'পণ্য', 'খাদ্যশস্য'];
   const modeAllowedTokens = ['status', 'state', 'অবস্থা', 'upazila', 'উপজেলা', 'district', 'জেলা', 'office', 'division', 'fiscalyear', 'fy', 'অর্থবছর'];
+  const preserveIfBlankTokens = new Set(['note', 'remarks', 'comment', 'মন্তব্য', 'createdat', 'rate', 'unitprice', 'দর', 'dealerallocationid', 'suballocationid', 'allocationid']);
 
   const oldDataRows = existingGrid.slice(headerRowIdx + 1);
-  if (existingIdCol >= 0) {
-    for (const r of oldDataRows) {
+  for (const r of oldDataRows) {
+    if (existingIdCol >= 0) {
       const idVal = String(r[existingIdCol] ?? '').trim();
       if (idVal) oldRowsById.set(idVal, r);
+    }
+    if (existingChallanNoCol >= 0) {
+      const chVal = normChallanNo(String(r[existingChallanNoCol] ?? ''));
+      if (chVal && !oldRowsByChallanNo.has(`M::${chVal}`)) oldRowsByChallanNo.set(`M::${chVal}`, r);
+    }
+    if (existingTaxNoCol >= 0) {
+      const txVal = normChallanNo(String(r[existingTaxNoCol] ?? ''));
+      if (txVal && !oldRowsByChallanNo.has(`T::${txVal}`)) oldRowsByChallanNo.set(`T::${txVal}`, r);
     }
   }
 
@@ -3075,17 +3366,43 @@ export function projectPayloadRowsForExistingSheet(
   ]);
 
   const projectedRows: Array<Array<string | number>> = [targetHeaders];
-  for (let rIdx = 1; rIdx < payload.rows.length; rIdx++) {
-    const srcRow = payload.rows[rIdx];
+  for (let rIdx = 1; rIdx < activeRows.length; rIdx++) {
+    const srcRow = activeRows[rIdx];
     const rowId = idIncomingIdx >= 0 ? String(srcRow[idIncomingIdx] ?? '').trim() : '';
-    const oldRow = rowId ? oldRowsById.get(rowId) : undefined;
+    const mNoKey =
+      mainChallanNoIncomingIdx >= 0 ? normChallanNo(String(srcRow[mainChallanNoIncomingIdx] ?? '')) : '';
+    const tNoKey =
+      taxChallanNoIncomingIdx >= 0 ? normChallanNo(String(srcRow[taxChallanNoIncomingIdx] ?? '')) : '';
+    const oldRow =
+      (rowId ? oldRowsById.get(rowId) : undefined) ||
+      (mNoKey ? oldRowsByChallanNo.get(`M::${mNoKey}`) : undefined) ||
+      (tNoKey ? oldRowsByChallanNo.get(`T::${tNoKey}`) : undefined);
     const rowDateStr = dateIncomingIdx >= 0 ? String(srcRow[dateIncomingIdx] ?? '') : '';
 
     const outRow: Array<string | number> = targetHeaders.map((th, colIdx) => {
       const nh = normColKey(th);
-      const srcIdx = aliasToIncomingIdx.get(nh);
+      const srcIdx = activeAliasToIncomingIdx.get(nh);
       if (srcIdx !== undefined) {
-        return srcRow[srcIdx] ?? '';
+        const val = srcRow[srcIdx] ?? '';
+        if (
+          srcIdx === idIncomingIdx &&
+          oldRow &&
+          existingIdCol >= 0 &&
+          String(oldRow[existingIdCol] ?? '').trim() &&
+          (String(val).startsWith('ch-ext-') || String(val).startsWith('ch-rec-'))
+        ) {
+          return String(oldRow[existingIdCol]).trim();
+        }
+        if (
+          String(val).trim() === '' &&
+          preserveIfBlankTokens.has(nh) &&
+          oldRow &&
+          colIdx < existingHeaders.length &&
+          String(oldRow[colIdx] ?? '').trim() !== ''
+        ) {
+          return typeof oldRow[colIdx] === 'number' ? (oldRow[colIdx] as number) : String(oldRow[colIdx]);
+        }
+        return val;
       }
       if (slColTokens.includes(nh)) {
         return rIdx;
@@ -3098,7 +3415,7 @@ export function projectPayloadRowsForExistingSheet(
         return payload.grainValues[rIdx - 1];
       }
       // Never copy old embedded Tax_Challan_* values onto split challan rows (prevents roundtrip duplication)
-      if (payload.key === 'challans' && splitTaxColTokens.has(nh)) {
+      if (payload.key === 'challans' && !useCombinedChallan && splitTaxColTokens.has(nh)) {
         return '';
       }
       if (oldRow && colIdx < existingHeaders.length) {
@@ -3316,8 +3633,35 @@ function projectRowsForSheet_(sheet, t) {
     return { startRow: 1, rows: rows };
   }
   var existingHeaders = rawHdr.map(function(h) { return String(h === null || h === undefined ? '' : h).trim(); });
+  var splitTaxTokens = ['taxchallanno','incometaxchallanno','taxchallannumber','incometaxchallannumber','আয়করচালাননং','আয়করচালান','ভ্যাটআয়করচালান','ট্যাক্সচালান','taxchallandate','incometaxdate','incometaxchallandate','আয়করতারিখ','আয়করচালানেরতারিখ','taxchallanamount','incometaxamount','taxamount','depositedtaxamount','আয়করটাকা','আয়করেরপরিমাণ','requiredtaxamount','recordedtaxamount','রেকর্ডআয়কর'];
+  var useCombinedChallan = false;
+  if (t.key === 'challans' && Array.isArray(t.combinedRows) && t.combinedColumnAliases) {
+    for (var chkEh = 0; chkEh < existingHeaders.length; chkEh++) {
+      if (splitTaxTokens.indexOf(normColKey_(existingHeaders[chkEh])) >= 0) {
+        useCombinedChallan = true;
+        break;
+      }
+    }
+  }
+  if (useCombinedChallan) {
+    rows = t.combinedRows;
+    incomingHeaders = rows[0].map(function(h) { return String(h); });
+    aliasMap = {};
+    var combCa = t.combinedColumnAliases || {};
+    for (var cj = 0; cj < incomingHeaders.length; cj++) {
+      var chName = incomingHeaders[cj];
+      var cnh = normColKey_(chName);
+      if (cnh && aliasMap[cnh] === undefined) aliasMap[cnh] = cj;
+      var cList = combCa[chName] || combCa[cnh] || [];
+      for (var caIdx = 0; caIdx < cList.length; caIdx++) {
+        var cna = normColKey_(cList[caIdx]);
+        if (cna && aliasMap[cna] === undefined) aliasMap[cna] = cj;
+      }
+    }
+  }
+
   var oldDef = OLD_ID_FIRST_MAP_[t.key];
-  if (oldDef && existingHeaders.length === oldDef.length) {
+  if (!useCombinedChallan && oldDef && existingHeaders.length === oldDef.length) {
     var allOld = true;
     for (var oi = 0; oi < oldDef.length; oi++) {
       if (normColKey_(existingHeaders[oi]) !== oldDef[oi]) { allOld = false; break; }
@@ -3327,28 +3671,40 @@ function projectRowsForSheet_(sheet, t) {
   var idInIdx = -1;
   var challanTypeInIdx = -1;
   var dateInIdx = -1;
+  var mainNoInIdx = -1;
+  var taxNoInIdx = -1;
   var dkNorm = t.dateFieldKey ? normColKey_(t.dateFieldKey) : '';
   for (var ii = 0; ii < incomingHeaders.length; ii++) {
     var ink = normColKey_(incomingHeaders[ii]);
     if (ink === 'id') idInIdx = ii;
-    if (t.key === 'challans' && ink === 'challantype') challanTypeInIdx = ii;
+    if (t.key === 'challans' && !useCombinedChallan && ink === 'challantype') challanTypeInIdx = ii;
+    if (t.key === 'challans' && ink === 'challanno') mainNoInIdx = ii;
+    if (t.key === 'challans' && useCombinedChallan && ink === 'taxchallanno') taxNoInIdx = ii;
     if (dkNorm && ink === dkNorm) dateInIdx = ii;
   }
   var hasId = false;
   var hasChallanType = false;
   var existingIdCol = -1;
+  var existingNoCol = -1;
+  var existingTaxNoCol = -1;
   for (var eh = 0; eh < existingHeaders.length; eh++) {
     var mappedIdx = aliasMap[normColKey_(existingHeaders[eh])];
     if (mappedIdx === idInIdx && idInIdx >= 0) {
       hasId = true;
       existingIdCol = eh;
     }
+    if (mappedIdx === mainNoInIdx && mainNoInIdx >= 0 && existingNoCol < 0) {
+      existingNoCol = eh;
+    }
+    if (mappedIdx === taxNoInIdx && taxNoInIdx >= 0 && existingTaxNoCol < 0) {
+      existingTaxNoCol = eh;
+    }
     if (mappedIdx === challanTypeInIdx && challanTypeInIdx >= 0) {
       hasChallanType = true;
     }
   }
   var needsChallanType = false;
-  if (t.key === 'challans' && challanTypeInIdx >= 0 && !hasChallanType) {
+  if (t.key === 'challans' && !useCombinedChallan && challanTypeInIdx >= 0 && !hasChallanType) {
     for (var ctr = 1; ctr < rows.length; ctr++) {
       if (String(rows[ctr][challanTypeInIdx] || '').indexOf('আয়কর') >= 0) {
         needsChallanType = true;
@@ -3360,17 +3716,32 @@ function projectRowsForSheet_(sheet, t) {
   if (!hasId && idInIdx >= 0) targetHeaders.push('id');
   if (needsChallanType) targetHeaders.push('challanType');
   var oldRowsById = {};
+  var oldRowsByNo = {};
+  var normNoForMatch_ = function(v) {
+    return String(v === null || v === undefined ? '' : v).replace(/[০-৯]/g, function(d) {
+      return String('০১২৩৪৫৬৭৮৯'.indexOf(d));
+    }).trim().replace(/^'+/, '').replace(/[\s]+/g, '').toLowerCase().replace(/^0+(?=\d)/, '');
+  };
   var oldDataRows = existingGrid.slice(headerIdx + 1);
-  if (existingIdCol >= 0) {
-    for (var od = 0; od < oldDataRows.length; od++) {
+  for (var od = 0; od < oldDataRows.length; od++) {
+    if (existingIdCol >= 0) {
       var idKey = String(oldDataRows[od][existingIdCol] || '').trim();
       if (idKey) oldRowsById[idKey] = oldDataRows[od];
+    }
+    if (existingNoCol >= 0) {
+      var mk = normNoForMatch_(cellToVal_(oldDataRows[od][existingNoCol]));
+      if (mk && !oldRowsByNo['M::' + mk]) oldRowsByNo['M::' + mk] = oldDataRows[od];
+    }
+    if (existingTaxNoCol >= 0) {
+      var tk = normNoForMatch_(cellToVal_(oldDataRows[od][existingTaxNoCol]));
+      if (tk && !oldRowsByNo['T::' + tk]) oldRowsByNo['T::' + tk] = oldDataRows[od];
     }
   }
   var fyTokens = ['fiscalyear','fy','session','অর্থবছর'];
   var slTokens = ['sl','slno','serial','serialno','ক্রমিক','ক্রম'];
   var grainTokens = ['grain','commodity','item','foodgrain','শস্য','পণ্য','খাদ্যশস্য'];
   var modeTokens = ['status','state','অবস্থা','upazila','উপজেলা','district','জেলা','office','division','fiscalyear','fy','অর্থবছর'];
+  var preserveBlankTokens = ['note','remarks','comment','মন্তব্য','createdat','rate','unitprice','দর','dealerallocationid','suballocationid','allocationid'];
   var fySample = '';
   var colModes = {};
   for (var ci = 0; ci < existingHeaders.length; ci++) {
@@ -3398,20 +3769,28 @@ function projectRowsForSheet_(sheet, t) {
       if (bestV) colModes[ci] = bestV;
     }
   }
-  var splitTaxTokens = ['taxchallanno','incometaxchallanno','আয়করচালাননং','আয়করচালান','ভ্যাটআয়করচালান','ট্যাক্সচালান','taxchallandate','incometaxdate','আয়করতারিখ','আয়করচালানেরতারিখ','taxchallanamount','incometaxamount','taxamount','depositedtaxamount','আয়করটাকা','আয়করেরপরিমাণ','requiredtaxamount','recordedtaxamount','রেকর্ডআয়কর'];
   var out = [targetHeaders];
   var gVals = Array.isArray(t.grainValues) ? t.grainValues : [];
   for (var ri = 1; ri < rows.length; ri++) {
     var srcRow = rows[ri];
     var rid = idInIdx >= 0 ? String(srcRow[idInIdx] || '').trim() : '';
-    var oldRow = rid ? oldRowsById[rid] : null;
+    var rMainNo = mainNoInIdx >= 0 ? normNoForMatch_(srcRow[mainNoInIdx]) : '';
+    var rTaxNo = taxNoInIdx >= 0 ? normNoForMatch_(srcRow[taxNoInIdx]) : '';
+    var oldRow = (rid && oldRowsById[rid]) || (rMainNo && oldRowsByNo['M::' + rMainNo]) || (rTaxNo && oldRowsByNo['T::' + rTaxNo]) || null;
     var rDate = dateInIdx >= 0 ? String(srcRow[dateInIdx] || '') : '';
     var line = [];
     for (var tj = 0; tj < targetHeaders.length; tj++) {
       var thn = normColKey_(targetHeaders[tj]);
       var sIdx = aliasMap[thn];
       if (sIdx !== undefined) {
-        line.push(srcRow[sIdx] === undefined || srcRow[sIdx] === null ? '' : srcRow[sIdx]);
+        var cellVal = srcRow[sIdx] === undefined || srcRow[sIdx] === null ? '' : srcRow[sIdx];
+        if (sIdx === idInIdx && oldRow && existingIdCol >= 0 && String(oldRow[existingIdCol] || '').trim() !== '' && (String(cellVal).indexOf('ch-ext-') === 0 || String(cellVal).indexOf('ch-rec-') === 0)) {
+          line.push(String(oldRow[existingIdCol]).trim());
+        } else if (String(cellVal).trim() === '' && preserveBlankTokens.indexOf(thn) >= 0 && oldRow && tj < existingHeaders.length && String(cellToVal_(oldRow[tj])).trim() !== '') {
+          line.push(cellToVal_(oldRow[tj]));
+        } else {
+          line.push(cellVal);
+        }
       } else if (slTokens.indexOf(thn) >= 0) {
         line.push(ri);
       } else if (fyTokens.indexOf(thn) >= 0) {
@@ -3419,7 +3798,7 @@ function projectRowsForSheet_(sheet, t) {
         line.push(oldFy || computeFiscalYear_(rDate, fySample));
       } else if (grainTokens.indexOf(thn) >= 0 && gVals[ri - 1]) {
         line.push(gVals[ri - 1]);
-      } else if (t.key === 'challans' && splitTaxTokens.indexOf(thn) >= 0) {
+      } else if (t.key === 'challans' && !useCombinedChallan && splitTaxTokens.indexOf(thn) >= 0) {
         line.push('');
       } else if (oldRow && tj < existingHeaders.length && String(cellToVal_(oldRow[tj])).trim() !== '') {
         line.push(cellToVal_(oldRow[tj]));
@@ -3568,11 +3947,13 @@ function syncAllTabsFromApp_(payload) {
           var exHdr = (exGrid[0] || []).map(function(h) { return normColKey_(h); });
           var exNoCol = -1;
           var exTypeCol = -1;
+          var exTaxCol = -1;
           for (var ehc = 0; ehc < exHdr.length; ehc++) {
             if (exNoCol < 0 && ['challanno','mainchallanno','challan','চালাননং','চালাননম্বর','মূলচালান'].indexOf(exHdr[ehc]) >= 0) exNoCol = ehc;
             if (exTypeCol < 0 && ['challantype','type','ধরন','চালানেরধরন'].indexOf(exHdr[ehc]) >= 0) exTypeCol = ehc;
+            if (exTaxCol < 0 && ['taxchallanno','incometaxchallanno','আয়করচালাননং','আয়করচালান','ভ্যাটআয়করচালান','ট্যাক্সচালান'].indexOf(exHdr[ehc]) >= 0) exTaxCol = ehc;
           }
-          if (exNoCol >= 0) {
+          if (exNoCol >= 0 || exTaxCol >= 0) {
             var inHdr = (t.rows[0] || []).map(function(h) { return normColKey_(h); });
             var inNoCol = inHdr.indexOf('challanno');
             var inTypeCol = inHdr.indexOf('challantype');
@@ -3584,11 +3965,17 @@ function syncAllTabsFromApp_(payload) {
             }
             var missingInIncoming = 0;
             for (var er = 1; er < exGrid.length; er++) {
-              var exNo = normChNo_(cellToVal_(exGrid[er][exNoCol]));
+              var exNo = exNoCol >= 0 ? normChNo_(cellToVal_(exGrid[er][exNoCol])) : '';
               var exTpRaw = exTypeCol >= 0 ? String(cellToVal_(exGrid[er][exTypeCol]) || '') : '';
               var exTp = (exTpRaw.indexOf('আয়কর') >= 0 || exTpRaw.toLowerCase().indexOf('tax') >= 0) ? 'আয়কর চালান' : 'মূল চালান';
               if (exNo && !incomingKeySet[exNo + '::' + exTp] && !delKeys[exNo + '::' + exTp]) {
                 missingInIncoming++;
+              }
+              if (exTaxCol >= 0) {
+                var exTaxNo = normChNo_(cellToVal_(exGrid[er][exTaxCol]));
+                if (exTaxNo && !incomingKeySet[exTaxNo + '::আয়কর চালান'] && !delKeys[exTaxNo + '::আয়কর চালান']) {
+                  missingInIncoming++;
+                }
               }
             }
             if (missingInIncoming > 0) {
@@ -3900,6 +4287,8 @@ export function buildAllocationSheetPayloads(
       exactOnly: false,
       dateFieldKey: 'challanDate',
       columnAliases: TAB_COLUMN_ALIASES.challans,
+      combinedColumnAliases: COMBINED_CHALLAN_COLUMN_ALIASES,
+      combinedRows: combineChallansForCombinedSheet(db.challans, db.rates),
       rows: [
         [...ALLOC_SHEET_TABS.challans.headers],
         ...sortChallansCleanly(deduplicateChallanRecords(db.challans)).map((r) => [
@@ -3917,7 +4306,7 @@ export function buildAllocationSheetPayloads(
           r.dealerAllocationId ?? '',
           toCleanIsoDate(r.doDate ?? ''),
           r.allocationQty ?? '',
-          r.id,
+          r.sourceRowId || r.id,
         ]),
       ],
     },
@@ -4274,4 +4663,6 @@ export async function writeAllocationDatabaseToAppsScript(
 }
 
 export { uid };
+
+
 
