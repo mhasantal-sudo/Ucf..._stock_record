@@ -333,22 +333,118 @@ export function generateAdaptiveIconXml(): string {
 `;
 }
 
-export function generateAdaptiveForegroundXml(config: AndroidAppConfig): string {
+export function generateAdaptiveForegroundXml(_config: AndroidAppConfig): string {
+  const grainPath = 'M0,-25 C14,-11 14,11 0,25 C-14,11 -14,-11 0,-25 Z';
+  const sideGrainPath = 'M0,-21 C12,-9 12,9 0,21 C-12,9 -12,-9 0,-21 Z';
   return `<?xml version="1.0" encoding="utf-8"?>
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M34,30H74C77.3,30 80,32.7 80,36V76C80,79.3 77.3,82 74,82H34C30.7,82 28,79.3 28,76V36C28,32.7 30.7,30 34,30Z" />
-    <path
-        android:fillColor="${config.primaryColor}"
-        android:pathData="M42,40H52V50H62V58H52V68H42V58H32V50H42V40Z" />
-    <path
-        android:fillColor="#B91C1C"
-        android:pathData="M56,64H74V72H56V64Z" />
+    <group
+        android:translateX="21"
+        android:translateY="21"
+        android:scaleX="0.1289"
+        android:scaleY="0.1289">
+        <path
+            android:strokeColor="#FCD34D"
+            android:strokeWidth="8"
+            android:strokeLineCap="round"
+            android:pathData="M250,398 Q186,290 162,178" />
+        <path
+            android:strokeColor="#FCD34D"
+            android:strokeWidth="8"
+            android:strokeLineCap="round"
+            android:pathData="M262,398 Q326,290 350,178" />
+
+        <group android:translateX="154" android:translateY="156" android:rotation="-22">
+            <path android:fillColor="#FDE047" android:pathData="${sideGrainPath}" />
+        </group>
+        <group android:translateX="140" android:translateY="198" android:rotation="-50">
+            <path android:fillColor="#FACC15" android:pathData="${sideGrainPath}" />
+        </group>
+        <group android:translateX="178" android:translateY="186" android:rotation="12">
+            <path android:fillColor="#FACC15" android:pathData="${sideGrainPath}" />
+        </group>
+        <group android:translateX="150" android:translateY="244" android:rotation="-50">
+            <path android:fillColor="#FBBF24" android:pathData="${sideGrainPath}" />
+        </group>
+        <group android:translateX="190" android:translateY="232" android:rotation="12">
+            <path android:fillColor="#FBBF24" android:pathData="${sideGrainPath}" />
+        </group>
+        <group android:translateX="166" android:translateY="290" android:rotation="-48">
+            <path android:fillColor="#F59E0B" android:pathData="${sideGrainPath}" />
+        </group>
+        <group android:translateX="206" android:translateY="278" android:rotation="14">
+            <path android:fillColor="#F59E0B" android:pathData="${sideGrainPath}" />
+        </group>
+
+        <group android:translateX="358" android:translateY="156" android:rotation="22">
+            <path android:fillColor="#FDE047" android:pathData="${sideGrainPath}" />
+        </group>
+        <group android:translateX="372" android:translateY="198" android:rotation="50">
+            <path android:fillColor="#FACC15" android:pathData="${sideGrainPath}" />
+        </group>
+        <group android:translateX="334" android:translateY="186" android:rotation="-12">
+            <path android:fillColor="#FACC15" android:pathData="${sideGrainPath}" />
+        </group>
+        <group android:translateX="362" android:translateY="244" android:rotation="50">
+            <path android:fillColor="#FBBF24" android:pathData="${sideGrainPath}" />
+        </group>
+        <group android:translateX="322" android:translateY="232" android:rotation="-12">
+            <path android:fillColor="#FBBF24" android:pathData="${sideGrainPath}" />
+        </group>
+        <group android:translateX="346" android:translateY="290" android:rotation="48">
+            <path android:fillColor="#F59E0B" android:pathData="${sideGrainPath}" />
+        </group>
+        <group android:translateX="306" android:translateY="278" android:rotation="-14">
+            <path android:fillColor="#F59E0B" android:pathData="${sideGrainPath}" />
+        </group>
+
+        <path
+            android:strokeColor="#FEF08A"
+            android:strokeWidth="10"
+            android:strokeLineCap="round"
+            android:pathData="M256,416 L256,146" />
+        <group android:translateX="256" android:translateY="112">
+            <path android:fillColor="#FEF08A" android:pathData="${grainPath}" />
+        </group>
+        <group android:translateX="230" android:translateY="156" android:rotation="-36">
+            <path android:fillColor="#FDE047" android:pathData="${grainPath}" />
+        </group>
+        <group android:translateX="282" android:translateY="156" android:rotation="36">
+            <path android:fillColor="#FDE047" android:pathData="${grainPath}" />
+        </group>
+        <group android:translateX="226" android:translateY="204" android:rotation="-38">
+            <path android:fillColor="#FACC15" android:pathData="${grainPath}" />
+        </group>
+        <group android:translateX="286" android:translateY="204" android:rotation="38">
+            <path android:fillColor="#FACC15" android:pathData="${grainPath}" />
+        </group>
+        <group android:translateX="226" android:translateY="254" android:rotation="-38">
+            <path android:fillColor="#FBBF24" android:pathData="${grainPath}" />
+        </group>
+        <group android:translateX="286" android:translateY="254" android:rotation="38">
+            <path android:fillColor="#FBBF24" android:pathData="${grainPath}" />
+        </group>
+        <group android:translateX="229" android:translateY="304" android:rotation="-36">
+            <path android:fillColor="#F59E0B" android:pathData="${grainPath}" />
+        </group>
+        <group android:translateX="283" android:translateY="304" android:rotation="36">
+            <path android:fillColor="#F59E0B" android:pathData="${grainPath}" />
+        </group>
+
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M254,410 C190,405 134,358 120,288 C166,318 212,356 254,398 Z" />
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M258,410 C322,405 378,358 392,288 C346,318 300,356 258,398 Z" />
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M242,384 H270 A8,8 0 0,1 278,392 A8,8 0 0,1 270,400 H242 A8,8 0 0,1 234,392 A8,8 0 0,1 242,384 Z" />
+    </group>
 </vector>
 `;
 }

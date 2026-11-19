@@ -4,14 +4,52 @@
       <stop offset="0%" stop-color="#0D6E4E"/>
       <stop offset="100%" stop-color="#059669"/>
     </linearGradient>
+    <linearGradient id="goldTop" x1="256" y1="84" x2="256" y2="360" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FEF08A"/>
+      <stop offset="55%" stop-color="#FACC15"/>
+      <stop offset="100%" stop-color="#F59E0B"/>
+    </linearGradient>
   </defs>
+
   <rect width="512" height="512" rx="112" fill="url(#bg)"/>
-  <path d="M138 118C138 105.85 147.85 96 160 96H352C364.15 96 374 105.85 374 118V404L344 382L314 404L285 382L256 404L227 382L198 404L168 382L138 404V118Z" fill="#FFFFFF"/>
-  <rect x="176" y="140" width="70" height="70" rx="10" stroke="#0D6E4E" stroke-width="14"/>
-  <rect x="197" y="161" width="28" height="28" rx="4" fill="#0D6E4E"/>
-  <rect x="266" y="140" width="70" height="70" rx="10" stroke="#059669" stroke-width="14"/>
-  <rect x="287" y="161" width="28" height="28" rx="4" fill="#059669"/>
-  <rect x="176" y="244" width="160" height="20" rx="10" fill="#1e293b"/>
-  <rect x="176" y="284" width="118" height="18" rx="9" fill="#64748b"/>
-  <rect x="176" y="322" width="140" height="18" rx="9" fill="#94a3b8"/>
+  <circle cx="256" cy="256" r="196" fill="#065F46" fill-opacity="0.34" stroke="#6EE7B7" stroke-opacity="0.28" stroke-width="4"/>
+
+  <!-- Left & Right Stalk Stems -->
+  <path d="M250 398 Q186 290 162 178" stroke="#FCD34D" stroke-width="8" stroke-linecap="round"/>
+  <path d="M262 398 Q326 290 350 178" stroke="#FCD34D" stroke-width="8" stroke-linecap="round"/>
+
+  <!-- Left Stalk Grains -->
+  <ellipse cx="154" cy="156" rx="13" ry="23" transform="rotate(-22 154 156)" fill="#FDE047"/>
+  <ellipse cx="140" cy="198" rx="13" ry="22" transform="rotate(-50 140 198)" fill="#FACC15"/>
+  <ellipse cx="178" cy="186" rx="13" ry="22" transform="rotate(12 178 186)" fill="#FACC15"/>
+  <ellipse cx="150" cy="244" rx="13.5" ry="22" transform="rotate(-50 150 244)" fill="#FBBF24"/>
+  <ellipse cx="190" cy="232" rx="13.5" ry="22" transform="rotate(12 190 232)" fill="#FBBF24"/>
+  <ellipse cx="166" cy="290" rx="13" ry="21" transform="rotate(-48 166 290)" fill="#F59E0B"/>
+  <ellipse cx="206" cy="278" rx="13" ry="21" transform="rotate(14 206 278)" fill="#F59E0B"/>
+
+  <!-- Right Stalk Grains -->
+  <ellipse cx="358" cy="156" rx="13" ry="23" transform="rotate(22 358 156)" fill="#FDE047"/>
+  <ellipse cx="372" cy="198" rx="13" ry="22" transform="rotate(50 372 198)" fill="#FACC15"/>
+  <ellipse cx="334" cy="186" rx="13" ry="22" transform="rotate(-12 334 186)" fill="#FACC15"/>
+  <ellipse cx="362" cy="244" rx="13.5" ry="22" transform="rotate(50 362 244)" fill="#FBBF24"/>
+  <ellipse cx="322" cy="232" rx="13.5" ry="22" transform="rotate(-12 322 232)" fill="#FBBF24"/>
+  <ellipse cx="346" cy="290" rx="13" ry="21" transform="rotate(48 346 290)" fill="#F59E0B"/>
+  <ellipse cx="306" cy="278" rx="13" ry="21" transform="rotate(-14 306 278)" fill="#F59E0B"/>
+
+  <!-- Center Main Grain Stalk -->
+  <path d="M256 416 V146" stroke="#FEF08A" stroke-width="10" stroke-linecap="round"/>
+  <ellipse cx="256" cy="112" rx="16" ry="28" fill="#FEF08A"/>
+  <ellipse cx="230" cy="156" rx="15" ry="27" transform="rotate(-36 230 156)" fill="#FDE047"/>
+  <ellipse cx="282" cy="156" rx="15" ry="27" transform="rotate(36 282 156)" fill="#FDE047"/>
+  <ellipse cx="226" cy="204" rx="16" ry="28" transform="rotate(-38 226 204)" fill="#FACC15"/>
+  <ellipse cx="286" cy="204" rx="16" ry="28" transform="rotate(38 286 204)" fill="#FACC15"/>
+  <ellipse cx="226" cy="254" rx="16" ry="28" transform="rotate(-38 226 254)" fill="#FBBF24"/>
+  <ellipse cx="286" cy="254" rx="16" ry="28" transform="rotate(38 286 254)" fill="#FBBF24"/>
+  <ellipse cx="229" cy="304" rx="15" ry="26" transform="rotate(-36 229 304)" fill="#F59E0B"/>
+  <ellipse cx="283" cy="304" rx="15" ry="26" transform="rotate(36 283 304)" fill="#F59E0B"/>
+
+  <!-- Sweeping White Base Leaves & Tie Band -->
+  <path d="M254 410 C190 405 134 358 120 288 C166 318 212 356 254 398 Z" fill="#FFFFFF"/>
+  <path d="M258 410 C322 405 378 358 392 288 C346 318 300 356 258 398 Z" fill="#FFFFFF"/>
+  <rect x="234" y="384" width="44" height="16" rx="8" fill="#FFFFFF"/>
 </svg>

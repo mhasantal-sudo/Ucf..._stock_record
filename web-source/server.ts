@@ -31,6 +31,10 @@ import {
   isDoPending,
   normalizeExternalDoList,
 } from './src/shared/externalDoSync.ts';
+import {
+  pushFilesToGitHub,
+  type GitHubFileEntry,
+} from './src/shared/githubPush.ts';
 import type { DeliveryOrder } from './src/types/grain.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1106,6 +1110,104 @@ async function startServer() {
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to package source code';
       res.status(500).json({ error: message });
+    }
+  });
+
+  app.post('/api/push-to-github', async (req, res) => {
+    try {
+      const body = (req.body || {}) as {
+        token?: string;
+        repository?: string;
+        branch?: string;
+        scope?: 'full' | 'web';
+        commitMessage?: string;
+        autoCreateRepo?: boolean;
+        isPrivateRepo?: boolean;
+        appName?: string;
+        packageName?: string;
+        targetUrl?: string;
+      };
+
+      const token = typeof body.token === 'string' ? body.token.trim() : '';
+      const repository = typeof body.repository === 'string' ? body.repository.trim() : '';
+      if (!token) {
+        res.status(400).json({ ok: false, error: 'GitHub Personal Access Token দিন।' });
+        return;
+      }
+      if (!repository) {
+        res.status(400).json({ ok: false, error: 'GitHub রিপোজিটরির নাম বা লিংক দিন।' });
+        return;
+      }
+
+      const scope = body.scope === 'web' ? 'web' : 'full';
+      const zip = new JSZip();
+      const distDir = path.join(__dirname, 'dist');
+      const config: AndroidAppConfig = {
+        ...DEFAULT_ANDROID_CONFIG,
+        ...(typeof body.appName === 'string' && body.appName.trim()
+          ? { appName: body.appName.trim() }
+          : {}),
+        ...(typeof body.packageName === 'string' && body.packageName.trim()
+          ? { packageName: body.packageName.trim() }
+          : {}),
+        ...(typeof body.targetUrl === 'string' && body.targetUrl.trim()
+          ? { targetUrl: body.targetUrl.trim() }
+          : {}),
+        bundleOfflineAssets: false,
+      };
+
+      packageWebSourceIntoZip(zip, __dirname, '');
+      if (scope === 'full') {
+        packageAndroidProjectIntoZip(zip, 'android', config, distDir, false);
+        zip.file('.github/workflows/build-apk.yml', generateGitHubActionsWorkflow(config));
+      }
+
+      if (!fs.existsSync(path.join(__dirname, 'README.md'))) {
+        zip.file(
+          'README.md',
+          [
+            '# খাদ্যশস্য বরাদ্দ ও বিতরণ ব্যবস্থাপনা সিস্টেম',
+            '',
+            '## ওয়েব অ্যাপ চালানো',
+            '```bash',
+            'npm install',
+            'npm run dev',
+            '```',
+            '',
+            '## GitHub Actions দিয়ে স্বয়ংক্রিয় Android APK বিল্ড',
+            '- এই রিপোজিটরিতে কোড পুশ করলে `.github/workflows/build-apk.yml` স্বয়ংক্রিয়ভাবে Web বিল্ড ও `app-debug.apk` তৈরি করবে।',
+            '- GitHub-এর **Actions** ট্যাব থেকে সর্বশেষ সফল রান খুলে **Artifacts** থেকে APK ডাউনলোড করুন।',
+            '',
+          ].join('\n')
+        );
+      }
+
+      const entries = Object.values(zip.files).filter((entry) => !entry.dir);
+      const files: GitHubFileEntry[] = await Promise.all(
+        entries.map(async (entry) => {
+          const buf = await entry.async('nodebuffer');
+          return {
+            path: entry.name,
+            base64Content: buf.toString('base64'),
+          };
+        })
+      );
+
+      const result = await pushFilesToGitHub({
+        token,
+        repository,
+        branch: typeof body.branch === 'string' ? body.branch : undefined,
+        commitMessage: typeof body.commitMessage === 'string' ? body.commitMessage : undefined,
+        autoCreateRepo: body.autoCreateRepo !== false,
+        isPrivateRepo: Boolean(body.isPrivateRepo),
+        cleanTree: scope === 'full',
+        files,
+      });
+
+      res.json(result);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'GitHub-এ কোড পুশ করা যায়নি।';
+      res.status(400).json({ ok: false, error: message });
     }
   });
 

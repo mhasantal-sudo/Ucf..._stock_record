@@ -9,6 +9,7 @@ import {
   REPORT_TEMPLATE_CATALOG,
   type AllocationCategory,
   type AllocationDatabase,
+  type AllocationDbSnapshot,
   type AllocationSheetsConfig,
   type CategoryRate,
   type ChairmanEntry,
@@ -38,7 +39,11 @@ import {
   fetchAllocationFromPublicSheet,
   fetchExternalChallansFromAppsScript,
   fetchExternalChallansFromSheet,
+  deduplicateChallanRecords,
+  parsePastedChallanTableText,
   reconcileChallansAndDOs,
+  recoverMissingChallansFromDOs,
+  sortChallansCleanly,
   writeAllocationDatabaseToAppsScript,
   writeAllocationDatabaseToOAuthSheet,
 } from '../shared/allocSheetsSync';
@@ -52,6 +57,7 @@ import {
   memosLikelyMatch,
   namesFuzzyMatch,
   namesLikelyMatch,
+  normChallanNo,
   normMemoNo,
   parseMonthYear,
   round2,
@@ -73,12 +79,64 @@ import { extractSpreadsheetId, GoogleAuthExpiredError } from '../shared/googleSh
 const STORAGE_DB_KEY = 'khaddo_boraddo_db_v1';
 const STORAGE_SHEETS_KEY = 'khaddo_boraddo_sheets_v1';
 const STORAGE_PENDING_PUSH_KEY = 'khaddo_boraddo_pending_push_v1';
+const STORAGE_SNAPSHOTS_KEY = 'khaddo_boraddo_snapshots_v1';
+const STORAGE_DELETED_CHALLAN_KEYS_KEY = 'khaddo_boraddo_deleted_challans_v1';
 const LEGACY_GRAIN_SHEETS_KEY = 'khaddo_stock_gsheets_config_v1';
 const PORTRAIT_MIGRATION_KEY = 'khaddo_boraddo_portrait_migrated_v1';
 const PURGE_SAMPLE_MIGRATION_KEY = 'khaddo_boraddo_purge_sample_v1';
 const CLEAN_TITLES_MIGRATION_KEY = 'khaddo_boraddo_clean_titles_v1';
 const MONTHLY_NO_COPY_MIGRATION_KEY = 'khaddo_boraddo_monthly_no_copy_v1';
 const CHALLAN_SIGN_EQUAL_MIGRATION_KEY = 'khaddo_boraddo_challan_sign_equal_v1';
+
+function loadInitialSnapshots(): AllocationDbSnapshot[] {
+  try {
+    if (typeof localStorage === 'undefined') return [];
+    const raw = localStorage.getItem(STORAGE_SNAPSHOTS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as AllocationDbSnapshot[]).slice(0, 12) : [];
+  } catch {
+    return [];
+  }
+}
+
+function persistSnapshots(list: AllocationDbSnapshot[]): void {
+  if (typeof localStorage === 'undefined') return;
+  let trimmed = list.slice(0, 12);
+  while (trimmed.length > 0) {
+    try {
+      localStorage.setItem(STORAGE_SNAPSHOTS_KEY, JSON.stringify(trimmed));
+      return;
+    } catch {
+      trimmed = trimmed.slice(0, trimmed.length - 1);
+    }
+  }
+}
+
+function loadDeletedChallanKeys(): Set<string> {
+  try {
+    if (typeof localStorage === 'undefined') return new Set();
+    const raw = localStorage.getItem(STORAGE_DELETED_CHALLAN_KEYS_KEY);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? new Set(parsed.map(String)) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+function persistDeletedChallanKeys(keys: Set<string>): void {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    if (keys.size === 0) {
+      localStorage.removeItem(STORAGE_DELETED_CHALLAN_KEYS_KEY);
+    } else {
+      localStorage.setItem(STORAGE_DELETED_CHALLAN_KEYS_KEY, JSON.stringify(Array.from(keys)));
+    }
+  } catch {
+    // ignore
+  }
+}
 
 function getWriteTargetKey(spreadsheetId: string, gasUrl: string): string {
   const cleanId = extractSpreadsheetId(spreadsheetId);
@@ -338,6 +396,7 @@ export function useAllocationStore() {
   const [isSyncingSheets, setIsSyncingSheets] = useState(false);
   const [driveFiles, setDriveFiles] = useState<DriveSpreadsheetFile[]>([]);
   const [hasPendingSheetSync, setHasPendingSheetSync] = useState<boolean>(loadPendingPushFlag);
+  const [snapshots, setSnapshots] = useState<AllocationDbSnapshot[]>(loadInitialSnapshots);
   const [writeConfirmState, setWriteConfirmState] = useState<{
     request: SheetWriteConfirmRequest;
     targetKey: string;
@@ -358,6 +417,34 @@ export function useAllocationStore() {
   const pendingAutoPushRef = useRef(false);
   const touchedMainChallansRef = useRef(false);
   const hadNonEmptyDbRef = useRef(countAllocationDatabaseRecords(db) > 0);
+  const deletedChallanKeysRef = useRef<Set<string>>(loadDeletedChallanKeys());
+
+  const recordAutoSnapshot = useCallback((targetDb: AllocationDatabase, reason: string) => {
+    if (countAllocationDatabaseRecords(targetDb) === 0) return;
+    const snap: AllocationDbSnapshot = {
+      id: uid('snap'),
+      createdAt: new Date().toISOString(),
+      reason,
+      challanCount: targetDb.challans.length,
+      doCount: targetDb.doIssues.length,
+      db: targetDb,
+    };
+    setSnapshots((prev) => {
+      const latest = prev[0];
+      if (
+        latest &&
+        latest.challanCount === snap.challanCount &&
+        latest.doCount === snap.doCount &&
+        latest.reason === snap.reason &&
+        Date.now() - new Date(latest.createdAt).getTime() < 5000
+      ) {
+        return prev;
+      }
+      const next = [snap, ...prev].slice(0, 12);
+      persistSnapshots(next);
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     dbRef.current = db;
@@ -1358,7 +1445,7 @@ export function useAllocationStore() {
       if (!input.challanNo.trim() || !input.dealerName.trim()) {
         return { ok: false, error: 'চালান নং ও ডিলারের নাম দিন।' };
       }
-      const normNo = normMemoNo(input.challanNo);
+      const normNo = normChallanNo(input.challanNo);
       if (!normNo) {
         return { ok: false, error: 'সঠিক চালান নম্বর দিন।' };
       }
@@ -1368,7 +1455,7 @@ export function useAllocationStore() {
         (c) =>
           c.id !== existingId &&
           c.challanType === input.challanType &&
-          normMemoNo(c.challanNo) === normNo
+          normChallanNo(c.challanNo) === normNo
       );
       if (dupChallan) {
         return {
@@ -1380,15 +1467,15 @@ export function useAllocationStore() {
       const existingRec = existingId ? db.challans.find((c) => c.id === existingId) : undefined;
       const usedInDo = db.doIssues.find((d) => {
         const matchMain =
-          input.challanType === 'মূল চালান' && d.challanNo && normMemoNo(d.challanNo) === normNo;
+          input.challanType === 'মূল চালান' && d.challanNo && normChallanNo(d.challanNo) === normNo;
         const matchTax =
-          input.challanType === 'আয়কর চালান' && d.taxChallanNo && normMemoNo(d.taxChallanNo) === normNo;
+          input.challanType === 'আয়কর চালান' && d.taxChallanNo && normChallanNo(d.taxChallanNo) === normNo;
         if (!matchMain && !matchTax) return false;
         if (
           existingRec &&
           existingRec.doNo &&
           normMemoNo(d.doNo) === normMemoNo(existingRec.doNo) &&
-          normMemoNo(existingRec.challanNo) === normNo
+          normChallanNo(existingRec.challanNo) === normNo
         ) {
           return false;
         }
@@ -1425,7 +1512,7 @@ export function useAllocationStore() {
           }
           const alreadyAssigned =
             input.challanType === 'মূল চালান' ? targetDo.challanNo : targetDo.taxChallanNo;
-          if (alreadyAssigned && normMemoNo(alreadyAssigned) !== normNo) {
+          if (alreadyAssigned && normChallanNo(alreadyAssigned) !== normNo) {
             return {
               ok: false,
               error: `ডিও নং ${toBnDigits(targetDo.doNo)}-এ ইতিমধ্যে ${input.challanType} নং ${toBnDigits(alreadyAssigned)} যুক্ত আছে!`,
@@ -1435,6 +1522,10 @@ export function useAllocationStore() {
       }
 
       touchedMainChallansRef.current = true;
+      if (normNo) {
+        deletedChallanKeysRef.current.delete(`${normNo}::${input.challanType}`);
+        persistDeletedChallanKeys(deletedChallanKeysRef.current);
+      }
       if (existingId) {
         setDb((prev) =>
           reconcileChallansAndDOs({
@@ -1475,22 +1566,28 @@ export function useAllocationStore() {
 
   const deleteChallan = useCallback((id: string) => {
     touchedMainChallansRef.current = true;
+    recordAutoSnapshot(dbRef.current, 'চালান মুছে ফেলার আগে');
     setDb((prev) => {
       const target = prev.challans.find((c) => c.id === id);
-      const targetNorm = target ? normMemoNo(target.challanNo) : '';
+      const targetNorm = target ? normChallanNo(target.challanNo) : '';
+      if (target) {
+        const delKey = targetNorm ? `${targetNorm}::${target.challanType}` : `id::${target.id}`;
+        deletedChallanKeysRef.current.add(delKey);
+        persistDeletedChallanKeys(deletedChallanKeysRef.current);
+      }
       const cleanedDos = target
         ? prev.doIssues.map((d) => {
             if (
               target.challanType === 'মূল চালান' &&
               d.challanNo &&
-              normMemoNo(d.challanNo) === targetNorm
+              normChallanNo(d.challanNo) === targetNorm
             ) {
               return { ...d, challanNo: undefined, challanDate: undefined, challanAmount: undefined };
             }
             if (
               target.challanType === 'আয়কর চালান' &&
               d.taxChallanNo &&
-              normMemoNo(d.taxChallanNo) === targetNorm
+              normChallanNo(d.taxChallanNo) === targetNorm
             ) {
               return {
                 ...d,
@@ -1508,7 +1605,7 @@ export function useAllocationStore() {
         doIssues: cleanedDos,
       });
     });
-  }, []);
+  }, [recordAutoSnapshot]);
 
   const verifyChallanForRecipient = useCallback(
     (
@@ -1519,6 +1616,7 @@ export function useAllocationStore() {
         subId?: string;
         unoDate?: string;
         unoMemo?: string;
+        ministryMemo?: string;
         issueDate?: string;
         excludeDoId?: string;
         excludeChallanIds?: Set<string>;
@@ -1527,6 +1625,47 @@ export function useAllocationStore() {
       if (!CHALLAN_CATEGORIES.includes(category)) {
         return { applicable: false, ok: true, message: 'চালান প্রযোজ্য নয় (বিনামূল্য খাত)' };
       }
+
+      const resolveKernelByMemo = (memoRaw?: string): boolean => {
+        const t = (memoRaw || '').trim();
+        if (!t) return false;
+        const dcRec = CATEGORY_BY_NAME[category]?.requiresDC
+          ? db.dcAllocations.find(
+              (d) =>
+                d.category === category &&
+                (d.dcMemo === t || normMemoNo(d.dcMemo) === normMemoNo(t))
+            )
+          : undefined;
+        const minMemo = dcRec ? dcRec.ministryMemo : t;
+        const minRec = db.ministryAllocations.find(
+          (m) =>
+            m.category === category &&
+            (m.memoNo === minMemo || normMemoNo(m.memoNo) === normMemoNo(minMemo))
+        );
+        return minRec?.grain === 'কার্নেল';
+      };
+
+      const subRec = opts?.subId
+        ? db.dealerSuballocations.find((s) => s.id === opts.subId)
+        : opts?.unoMemo
+          ? db.dealerSuballocations.find(
+              (s) =>
+                s.category === category &&
+                normMemoNo(s.unoMemo) === normMemoNo(opts.unoMemo) &&
+                isSamePartyName(s.dealerName, dealerName)
+            )
+          : undefined;
+
+      if (resolveKernelByMemo(opts?.ministryMemo) || (subRec && resolveKernelByMemo(subRec.sourceMemo))) {
+        return {
+          applicable: false,
+          ok: true,
+          requiredAmount: 0,
+          requiredTaxAmount: 0,
+          message: 'কার্নেল বরাদ্দে চালান প্রযোজ্য নয়',
+        };
+      }
+
       const rate = db.rates.find((r) => r.category === category);
       const effUnitPrice = rate?.unitPrice || (category === 'খাদ্য বান্ধব' ? 13000 : 0);
       const effTaxRate = rate?.taxRate || (category === 'খাদ্য বান্ধব' ? 200 : 0);
@@ -1540,13 +1679,13 @@ export function useAllocationStore() {
       for (const d of db.doIssues) {
         if (opts?.excludeDoId && d.id === opts.excludeDoId) continue;
         if (d.doNo) usedDoNos.add(normMemoNo(d.doNo));
-        if (d.challanNo) usedMainNos.add(normMemoNo(d.challanNo));
-        if (d.taxChallanNo) usedTaxNos.add(normMemoNo(d.taxChallanNo));
+        if (d.challanNo) usedMainNos.add(normChallanNo(d.challanNo));
+        if (d.taxChallanNo) usedTaxNos.add(normChallanNo(d.taxChallanNo));
       }
 
       const isChallanAlreadyUsed = (c: ChallanRecord): boolean => {
         if (opts?.excludeChallanIds?.has(c.id)) return true;
-        const cNo = normMemoNo(c.challanNo);
+        const cNo = normChallanNo(c.challanNo);
         if (c.challanType === 'মূল চালান' && cNo && usedMainNos.has(cNo)) return true;
         if (c.challanType === 'আয়কর চালান' && cNo && usedTaxNos.has(cNo)) return true;
         if (c.doNo && usedDoNos.has(normMemoNo(c.doNo))) return true;
@@ -1650,7 +1789,7 @@ export function useAllocationStore() {
         errors: errs,
       };
     },
-    [db.challans, db.doIssues, db.rates]
+    [db.challans, db.dcAllocations, db.dealerSuballocations, db.doIssues, db.ministryAllocations, db.rates]
   );
 
   const issueDOBatch = useCallback(
@@ -1707,6 +1846,7 @@ export function useAllocationStore() {
           subId: it.subId,
           unoDate: it.unoDate,
           unoMemo: it.unoMemo,
+          ministryMemo: it.ministryMemo,
           issueDate: it.issueDate,
           excludeChallanIds: batchUsedChallanIds,
         });
@@ -1980,6 +2120,7 @@ export function useAllocationStore() {
 
       setIsSyncingSheets(true);
       setGoogleAuthError(null);
+      recordAutoSnapshot(curDb, 'Google Sheet সিঙ্ক (Pull)-এর আগে');
       try {
         const token = tokenOverride ?? tokenRef.current ?? getGoogleAccessToken();
         let nextDb = curDb;
@@ -2025,26 +2166,67 @@ export function useAllocationStore() {
           const extChallan = await fetchExternalChallansFromSheet(challanTargetId, token);
           challanTitle = extChallan.title || challanTitle;
           if (extChallan.challans.length > 0) {
-            challanSyncedCount = extChallan.challans.length;
-            nextDb = { ...nextDb, challans: extChallan.challans };
+            const dedupedExt = deduplicateChallanRecords(extChallan.challans);
+            challanSyncedCount = dedupedExt.length;
+            nextDb = { ...nextDb, challans: dedupedExt };
           }
         } else if (challanGasUrl) {
           const extGas = await fetchExternalChallansFromAppsScript(challanGasUrl);
           challanTitle = 'চালান ওয়েব অ্যাপ';
           if (extGas.challans.length > 0) {
-            challanSyncedCount = extGas.challans.length;
-            nextDb = { ...nextDb, challans: extGas.challans };
+            const dedupedGas = deduplicateChallanRecords(extGas.challans);
+            challanSyncedCount = dedupedGas.length;
+            nextDb = { ...nextDb, challans: dedupedGas };
           }
+        }
+
+        // Preserve any unsynced local-only challans (chln-/ch-rec-/ch-paste-) so Pull never silently wipes local entries
+        const hadUnsyncedLocal =
+          loadPendingPushFlag() || JSON.stringify(curDb) !== lastSyncedDbJsonRef.current;
+        const pulledChallanKeySet = new Set(
+          nextDb.challans.map((c) => {
+            const n = normChallanNo(c.challanNo);
+            return n ? `${n}::${c.challanType}` : `id::${c.id}`;
+          })
+        );
+        const preservedLocalChallans = hadUnsyncedLocal
+          ? curDb.challans.filter((c) => {
+              const n = normChallanNo(c.challanNo);
+              const key = n ? `${n}::${c.challanType}` : `id::${c.id}`;
+              if (deletedChallanKeysRef.current.has(key)) return false;
+              if (pulledChallanKeySet.has(key)) return false;
+              return (
+                c.id.startsWith('chln-') ||
+                c.id.startsWith('ch-rec-') ||
+                c.id.startsWith('ch-paste-') ||
+                hadUnsyncedLocal
+              );
+            })
+          : [];
+        if (preservedLocalChallans.length > 0) {
+          nextDb = {
+            ...nextDb,
+            challans: sortChallansCleanly(
+              deduplicateChallanRecords([...nextDb.challans, ...preservedLocalChallans])
+            ),
+          };
         }
 
         nextDb = reconcileChallansAndDOs(nextDb);
         if (countAllocationDatabaseRecords(nextDb) > 0) {
           hadNonEmptyDbRef.current = true;
         }
-        lastSyncedDbJsonRef.current = JSON.stringify(nextDb);
-        touchedMainChallansRef.current = false;
-        savePendingPushFlag(false);
-        setHasPendingSheetSync(false);
+        if (preservedLocalChallans.length > 0) {
+          lastSyncedDbJsonRef.current = '';
+          touchedMainChallansRef.current = true;
+          savePendingPushFlag(true);
+          setHasPendingSheetSync(true);
+        } else {
+          lastSyncedDbJsonRef.current = JSON.stringify(nextDb);
+          touchedMainChallansRef.current = false;
+          savePendingPushFlag(false);
+          setHasPendingSheetSync(false);
+        }
         setDb(nextDb);
 
         const summaryDetails = `মন্ত্রণালয় ${toBnDigits(nextDb.ministryAllocations.length)}, উপবরাদ্দ ${toBnDigits(
@@ -2149,12 +2331,19 @@ export function useAllocationStore() {
         extractSpreadsheetId(cfg.challanSpreadsheetId || '') ||
           String(cfg.challanAppsScriptUrl || '').trim()
       );
-      const hasManualChallans = curDb.challans.some((c) => c.id.startsWith('chln-'));
+      const hasManualChallans = curDb.challans.some(
+        (c) =>
+          c.id.startsWith('chln-') ||
+          c.id.startsWith('ch-rec-') ||
+          c.id.startsWith('ch-paste-')
+      );
       const writeOpts = {
         skipChallansTab:
           hasExternalChallanSource && !hasManualChallans && !touchedMainChallansRef.current,
         allowEmptyOverwrite: hadNonEmptyDbRef.current,
+        deletedChallanKeys: Array.from(deletedChallanKeysRef.current),
       };
+      recordAutoSnapshot(curDb, 'Google Sheet-এ সেভ (Push)-এর আগে');
       const snapshotJson = JSON.stringify(curDb);
       isPushingRef.current = true;
       setIsSyncingSheets(true);
@@ -2204,6 +2393,8 @@ export function useAllocationStore() {
 
         pushSucceeded = true;
         touchedMainChallansRef.current = false;
+        deletedChallanKeysRef.current.clear();
+        persistDeletedChallanKeys(deletedChallanKeysRef.current);
         lastSyncedDbJsonRef.current = snapshotJson;
         savePendingPushFlag(false);
         setHasPendingSheetSync(false);
@@ -2661,6 +2852,7 @@ export function useAllocationStore() {
       const emptyBase = createEmptyAllocationDatabase();
       const nextOfficer = { ...DEFAULT_OFFICER_PROFILE, ...(source.officer || {}) };
       const defaultTpls = createDefaultTemplatesMap(nextOfficer);
+      recordAutoSnapshot(dbRef.current, 'JSON ব্যাকআপ রিস্টোরের আগে');
       setDb(
         reconcileChallansAndDOs({
           ...emptyBase,
@@ -2679,9 +2871,142 @@ export function useAllocationStore() {
         error: err instanceof Error ? err.message : 'সঠিক JSON ব্যাকআপ ফাইল নয়।',
       };
     }
-  }, []);
+  }, [recordAutoSnapshot]);
+
+  const recoverAndCleanChallans = useCallback(
+    (pastedTableText = ''): ActionResult => {
+      const curDb = dbRef.current;
+      recordAutoSnapshot(curDb, 'চালান রিকভারি ও পরিষ্কারের আগে');
+
+      const pastedRecords = pastedTableText.trim()
+        ? parsePastedChallanTableText(pastedTableText).map((c) => ({
+            ...c,
+            id: c.id.startsWith('ch-paste-') ? c.id : `ch-paste-${c.id}`,
+          }))
+        : [];
+
+      if (pastedTableText.trim() && pastedRecords.length === 0) {
+        return {
+          ok: false,
+          error:
+            'পেস্ট করা লেখা থেকে কোনো বৈধ চালান সারি পাওয়া যায়নি। Google Sheet থেকে চালান সারি কপি করে পেস্ট করুন।',
+        };
+      }
+
+      const existingKeySet = new Set(
+        curDb.challans
+          .map((c) => {
+            const n = normChallanNo(c.challanNo);
+            return n ? `${n}::${c.challanType}` : `id::${c.id}`;
+          })
+          .filter(Boolean)
+      );
+
+      const newFromPaste = pastedRecords.filter((c) => {
+        const n = normChallanNo(c.challanNo);
+        const k = n ? `${n}::${c.challanType}` : `id::${c.id}`;
+        if (n) deletedChallanKeysRef.current.delete(`${n}::${c.challanType}`);
+        return !existingKeySet.has(k);
+      });
+
+      const mergedForDoRecovery: AllocationDatabase = {
+        ...curDb,
+        challans: [...curDb.challans, ...pastedRecords],
+      };
+
+      const doRecRes = recoverMissingChallansFromDOs(mergedForDoRecovery);
+      for (const c of doRecRes.db.challans) {
+        const n = normChallanNo(c.challanNo);
+        if (n) deletedChallanKeysRef.current.delete(`${n}::${c.challanType}`);
+      }
+      persistDeletedChallanKeys(deletedChallanKeysRef.current);
+
+      touchedMainChallansRef.current = true;
+      savePendingPushFlag(true);
+      setHasPendingSheetSync(true);
+      setDb(doRecRes.db);
+
+      const totalRecovered = newFromPaste.length + doRecRes.recoveredCount;
+      const dupsRemoved = Math.max(0, curDb.challans.length + pastedRecords.length - doRecRes.db.challans.length);
+      return {
+        ok: true,
+        message: `সম্পন্ন! পেস্ট/ডিও থেকে ${toBnDigits(totalRecovered)}টি চালান পুনরুদ্ধার ও ${toBnDigits(dupsRemoved)}টি ডুপ্লিকেট সারি পরিষ্কার করে মোট ${toBnDigits(doRecRes.db.challans.length)}টি চালান সাজানো হয়েছে। এখন Google Sheet-এ সেভ (Push) করুন।`,
+      };
+    },
+    [recordAutoSnapshot]
+  );
+
+  const recoverChallansFromSnapshot = useCallback(
+    (snapshotId: string): ActionResult => {
+      const snap = snapshots.find((s) => s.id === snapshotId);
+      if (!snap) {
+        return { ok: false, error: 'নির্বাচিত স্ন্যাপশট পাওয়া যায়নি।' };
+      }
+      const curDb = dbRef.current;
+      recordAutoSnapshot(curDb, 'স্ন্যাপশট থেকে রিকভারির আগে');
+
+      const curKeys = new Set(
+        curDb.challans.map((c) => {
+          const n = normChallanNo(c.challanNo);
+          return n ? `${n}::${c.challanType}` : `id::${c.id}`;
+        })
+      );
+      const restoredOnly = (snap.db.challans || []).filter((c) => {
+        const n = normChallanNo(c.challanNo);
+        const k = n ? `${n}::${c.challanType}` : `id::${c.id}`;
+        if (n) deletedChallanKeysRef.current.delete(`${n}::${c.challanType}`);
+        return !curKeys.has(k);
+      });
+      persistDeletedChallanKeys(deletedChallanKeysRef.current);
+
+      const nextChallans = sortChallansCleanly(
+        deduplicateChallanRecords([...curDb.challans, ...restoredOnly])
+      );
+      const nextDb = reconcileChallansAndDOs({
+        ...curDb,
+        challans: nextChallans,
+      });
+
+      touchedMainChallansRef.current = true;
+      savePendingPushFlag(true);
+      setHasPendingSheetSync(true);
+      setDb(nextDb);
+
+      return {
+        ok: true,
+        message: `স্ন্যাপশট থেকে ${toBnDigits(restoredOnly.length)}টি হারানো চালান বর্তমান তালিকায় যুক্ত ও ডুপ্লিকেটমুক্ত করে সাজানো হয়েছে (মোট ${toBnDigits(nextDb.challans.length)}টি)।`,
+      };
+    },
+    [recordAutoSnapshot, snapshots]
+  );
+
+  const restoreFullSnapshot = useCallback(
+    (snapshotId: string): ActionResult => {
+      const snap = snapshots.find((s) => s.id === snapshotId);
+      if (!snap) {
+        return { ok: false, error: 'নির্বাচিত স্ন্যাপশট পাওয়া যায়নি।' };
+      }
+      recordAutoSnapshot(dbRef.current, 'সম্পূর্ণ স্ন্যাপশট রিস্টোরের আগে');
+      const restored = reconcileChallansAndDOs({
+        ...snap.db,
+        challans: sortChallansCleanly(deduplicateChallanRecords(snap.db.challans || [])),
+      });
+      touchedMainChallansRef.current = true;
+      deletedChallanKeysRef.current.clear();
+      persistDeletedChallanKeys(deletedChallanKeysRef.current);
+      savePendingPushFlag(true);
+      setHasPendingSheetSync(true);
+      setDb(restored);
+      return {
+        ok: true,
+        message: `স্ন্যাপশটের সম্পূর্ণ ডেটা (${toBnDigits(restored.challans.length)}টি চালান, ${toBnDigits(restored.doIssues.length)}টি ডিও) রিস্টোর হয়েছে!`,
+      };
+    },
+    [recordAutoSnapshot, snapshots]
+  );
 
   const clearAllLocalData = useCallback(() => {
+    recordAutoSnapshot(dbRef.current, 'লোকাল ক্যাশ মোছার আগে');
     hadNonEmptyDbRef.current = false;
     const emptyBase = createEmptyAllocationDatabase();
     setDb((prev) => {
@@ -2695,7 +3020,7 @@ export function useAllocationStore() {
     });
     savePendingPushFlag(false);
     setHasPendingSheetSync(false);
-  }, []);
+  }, [recordAutoSnapshot]);
 
   const unusedDoList = useMemo(() => getUnusedDoNumbers(db), [db]);
 
@@ -2710,6 +3035,7 @@ export function useAllocationStore() {
     isSyncingSheets,
     hasPendingSheetSync,
     sheetSyncState,
+    snapshots,
     pendingWriteConfirmRequest: writeConfirmState?.request || null,
     confirmPendingSheetWrite,
     cancelPendingSheetWrite,
@@ -2765,6 +3091,9 @@ export function useAllocationStore() {
     requestPushToGoogleSheet,
     exportBackupJson,
     importBackupJson,
+    recoverAndCleanChallans,
+    recoverChallansFromSnapshot,
+    restoreFullSnapshot,
     clearAllLocalData,
   };
 }

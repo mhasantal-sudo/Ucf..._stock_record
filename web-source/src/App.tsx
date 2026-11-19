@@ -14,7 +14,6 @@ import {
   Hammer,
   HeartHandshake,
   Home,
-  Landmark,
   Layers,
   Lock,
   Receipt,
@@ -44,6 +43,7 @@ import { AllocationSettingsView, type SettingsTabKey } from './components/Alloca
 import { CategoryEntryView, type EntryStageKey } from './components/CategoryEntryView';
 import { DOWorkspaceView, type DOTabKey } from './components/DOWorkspaceView';
 import { DashboardView } from './components/DashboardView';
+import { KernelEntryView } from './components/KernelEntryView';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { PendingProjectsWorkspace } from './components/PendingProjectsWorkspace';
@@ -133,9 +133,11 @@ function MainApplication() {
   const [section, setSection] = useState<MainSection>('entry');
   const [activeStage, setActiveStage] = useState<TopStageKey>('ministry');
 
-  // Entry view & Pending Projects workspace
+  // Entry view, Kernel entry & Pending Projects workspace
   const [selectedEntryCat, setSelectedEntryCat] = useState<AllocationCategory | null>(null);
   const [lockedEntryStage, setLockedEntryStage] = useState<EntryStageKey | null>(null);
+  const [entryJumpMemo, setEntryJumpMemo] = useState<{ memoNo: string; stage?: EntryStageKey } | null>(null);
+  const [showKernelEntry, setShowKernelEntry] = useState(false);
   const [showPendingWorkspace, setShowPendingWorkspace] = useState(false);
   const [isProjectUnlocked, setIsProjectUnlocked] = useState(false);
 
@@ -175,7 +177,12 @@ function MainApplication() {
   const [isDraggingPager, setIsDraggingPager] = useState(false);
 
   const stageCategories = useMemo(() => getCategoriesForStage(activeStage), [activeStage]);
-  const isHomeGridVisible = section === 'entry' && !selectedEntryCat && !showPendingWorkspace;
+  const kernelEntryCount = useMemo(
+    () => store.db.ministryAllocations.filter((m) => m.grain === 'কার্নেল').length,
+    [store.db.ministryAllocations]
+  );
+  const isHomeGridVisible =
+    section === 'entry' && !selectedEntryCat && !showPendingWorkspace && !showKernelEntry;
 
   useEffect(() => {
     const scale = Math.max(85, Math.min(135, store.db.officer.uiFontScale ?? 108));
@@ -410,12 +417,25 @@ function MainApplication() {
   const handleOpenPendingWorkspace = () => {
     setSelectedEntryCat(null);
     setLockedEntryStage(null);
+    setEntryJumpMemo(null);
+    setShowKernelEntry(false);
     setShowPendingWorkspace(true);
+    setSection('entry');
+  };
+
+  const handleOpenKernelEntry = () => {
+    setSelectedEntryCat(null);
+    setLockedEntryStage(null);
+    setEntryJumpMemo(null);
+    setShowPendingWorkspace(false);
+    setShowKernelEntry(true);
     setSection('entry');
   };
 
   const handleOpenCategoryFromDashboard = (cat: AllocationCategory) => {
     setShowPendingWorkspace(false);
+    setShowKernelEntry(false);
+    setEntryJumpMemo(null);
     setLockedEntryStage(null);
     setSelectedEntryCat(cat);
     setSection('entry');
@@ -441,6 +461,8 @@ function MainApplication() {
   const handleSwitchSection = (target: MainSection) => {
     setTemplateEditReturnTo(null);
     setShowPendingWorkspace(false);
+    setShowKernelEntry(false);
+    setEntryJumpMemo(null);
     setSection(target);
     if (target === 'entry') {
       setSelectedEntryCat(null);
@@ -555,9 +577,11 @@ function MainApplication() {
                   className="h-11 w-11 rounded-full object-cover ring-2 ring-white/60 shrink-0 bg-white/10"
                 />
               ) : (
-                <div className="h-11 w-11 rounded-full bg-white/15 ring-2 ring-white/50 flex items-center justify-center shrink-0">
-                  <Landmark className="h-5 w-5 text-white" />
-                </div>
+                <img
+                  src="/icon.svg"
+                  alt="খাদ্যশস্য বরাদ্দ ও বিতরণ"
+                  className="h-11 w-11 rounded-2xl object-cover ring-2 ring-white/70 shrink-0 shadow-sm bg-[#0D6E4E]"
+                />
               )}
 
               <div className="min-w-0">
@@ -845,14 +869,39 @@ function MainApplication() {
                   }}
                   onBack={() => setShowPendingWorkspace(false)}
                 />
+              ) : showKernelEntry ? (
+                <KernelEntryView
+                  db={store.db}
+                  onBack={() => setShowKernelEntry(false)}
+                  getMinistryUsage={store.getMinistryUsage}
+                  onAddMinistry={store.addMinistryAllocation}
+                  onUpdateMinistry={store.updateMinistryAllocation}
+                  onDeleteMinistry={store.deleteMinistryAllocation}
+                  onJumpToCategory={(cat, stage, memoNo) => {
+                    setShowKernelEntry(false);
+                    setLockedEntryStage(stage);
+                    setEntryJumpMemo({ memoNo, stage });
+                    setSelectedEntryCat(cat);
+                    setSection('entry');
+                  }}
+                  onOpenKernelRegister={() => {
+                    setShowKernelEntry(false);
+                    setActiveRegisterId('reg-kernel');
+                    setRegisterOpenTrigger((n) => n + 1);
+                    setSection('registers');
+                  }}
+                />
               ) : selectedEntryCat ? (
                 <CategoryEntryView
                   db={store.db}
                   selectedCategory={selectedEntryCat}
                   lockedStage={lockedEntryStage}
+                  initialJump={entryJumpMemo}
+                  onConsumeInitialJump={() => setEntryJumpMemo(null)}
                   onBack={() => {
                     setSelectedEntryCat(null);
                     setLockedEntryStage(null);
+                    setEntryJumpMemo(null);
                   }}
                   onSelectCategory={(cat) => setSelectedEntryCat(cat)}
                   getMinistryUsage={store.getMinistryUsage}
@@ -951,6 +1000,19 @@ function MainApplication() {
                           </button>
                         );
                       })}
+
+                      {/* Direct Top Menu Bar Button for Kernel Entry */}
+                      <button
+                        type="button"
+                        onClick={handleOpenKernelEntry}
+                        className="min-h-[44px] shrink-0 whitespace-nowrap inline-flex items-center gap-1.5 rounded-full px-4 py-2 text-xs sm:text-sm font-bold border border-emerald-300 bg-emerald-50 text-emerald-950 hover:bg-emerald-100 shadow-xs transition-all cursor-pointer"
+                      >
+                        <Wheat className="h-4 w-4 text-emerald-700 shrink-0" />
+                        <span>কার্নেল এন্ট্রি</span>
+                        <span className="inline-flex items-center rounded-full bg-emerald-700 text-white px-1.5 py-0.5 text-[10px] font-bold leading-none tabular-nums">
+                          {toBnDigits(kernelEntryCount)}টি
+                        </span>
+                      </button>
 
                       {/* Direct Top Menu Bar Button for Pending Projects */}
                       <button
@@ -1122,7 +1184,25 @@ function MainApplication() {
                   {/* Quick Features Strip */}
                   <div>
                     <h2 className="text-sm font-bold text-slate-800 mb-3">কুইক ফিচারসমূহ</h2>
-                    <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
+                    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
+                      <button
+                        type="button"
+                        onClick={handleOpenKernelEntry}
+                        className="min-h-[68px] flex items-center gap-2.5 rounded-2xl border border-emerald-300 bg-emerald-50/80 p-3 text-left hover:border-emerald-400 hover:bg-emerald-100/70 transition-colors cursor-pointer"
+                      >
+                        <span className="h-10 w-10 rounded-full bg-emerald-700 text-white flex items-center justify-center shrink-0">
+                          <Wheat className="h-5 w-5" />
+                        </span>
+                        <span className="min-w-0">
+                          <span className="block text-xs font-bold text-slate-900 leading-snug">
+                            কার্নেল এন্ট্রি
+                          </span>
+                          <span className="block text-[10.5px] font-bold text-emerald-800 tabular-nums mt-0.5">
+                            খাদ্য বান্ধব ও ভিডাব্লিউভি ({toBnDigits(kernelEntryCount)}টি)
+                          </span>
+                        </span>
+                      </button>
+
                       <button
                         type="button"
                         onClick={handleOpenPendingWorkspace}
@@ -1320,6 +1400,10 @@ function MainApplication() {
               onSaveRate={store.saveRate}
               onExportBackup={store.exportBackupJson}
               onImportBackup={store.importBackupJson}
+              snapshots={store.snapshots}
+              onRecoverAndCleanChallans={store.recoverAndCleanChallans}
+              onRecoverChallansFromSnapshot={store.recoverChallansFromSnapshot}
+              onRestoreFullSnapshot={store.restoreFullSnapshot}
               onClearLocalData={store.clearAllLocalData}
             />
           )}

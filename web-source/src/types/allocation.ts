@@ -14,6 +14,10 @@ export type AllocationCategory =
   | 'কাবিখা বিশেষ গম'
   | 'ভিডাব্লিউভি';
 
+export type GrainType = 'চাল' | 'গম' | 'আটা' | 'কার্নেল';
+
+export const GRAIN_OPTIONS: GrainType[] = ['চাল', 'গম', 'আটা', 'কার্নেল'];
+
 export type CategoryFlowType = 'dealer_food' | 'dealer_oms' | 'ep' | 'relief' | 'kabikha' | 'vwb';
 
 export type RegisterId =
@@ -31,6 +35,7 @@ export type RegisterId =
   | 'reg-kab-spc-rice'
   | 'reg-kab-spc-wheat'
   | 'reg-vwb'
+  | 'reg-kernel'
   | 'reg-challan';
 
 export type ReportTemplateId =
@@ -56,7 +61,7 @@ export interface CategoryMeta {
   requiresChallan: boolean;
   supportsProjects: boolean;
   hasPhase: boolean;
-  defaultGrain: 'চাল' | 'গম' | '';
+  defaultGrain: GrainType | '';
   groupLabel: 'ডিলার খাত' | 'ইপি' | 'ত্রাণ' | 'কাবিখা' | 'ভিডাব্লিউভি';
 }
 
@@ -277,7 +282,7 @@ export interface MinistryAllocation {
   memoNo: string;
   memoDate: string;
   allocationQty: number;
-  grain: 'চাল' | 'গম' | 'আটা';
+  grain: GrainType;
   phase?: number;
   comment?: string;
   createdAt: string;
@@ -545,6 +550,15 @@ export interface AllocationDatabase {
   reportMemos: Record<string, { no: string; date: string }>;
 }
 
+export interface AllocationDbSnapshot {
+  id: string;
+  createdAt: string;
+  reason: string;
+  challanCount: number;
+  doCount: number;
+  db: AllocationDatabase;
+}
+
 export interface TemplateCatalogItem {
   id: ReportTemplateId;
   label: string;
@@ -568,6 +582,7 @@ export const REPORT_TEMPLATE_CATALOG: TemplateCatalogItem[] = [
   { id: 'reg-kab-spc-rice', label: 'কাবিখা বিশেষ চাল রেজিস্টার', kind: 'register', defaultOrientation: 'landscape', defaultSubject: 'কাবিখা বিশেষ (চাল) প্রকল্প ভিত্তিক বরাদ্দ ও ডিও রেজিস্টার' },
   { id: 'reg-kab-spc-wheat', label: 'কাবিখা বিশেষ গম রেজিস্টার', kind: 'register', defaultOrientation: 'landscape', defaultSubject: 'কাবিখা বিশেষ (গম) প্রকল্প ভিত্তিক বরাদ্দ ও ডিও রেজিস্টার' },
   { id: 'reg-vwb', label: 'ভিডাব্লিউভি রেজিস্টার', kind: 'register', defaultOrientation: 'landscape', defaultSubject: 'ভিডাব্লিউভি (VWB) কর্মসূচির বরাদ্দ ও ডিও বিতরণ রেজিস্টার' },
+  { id: 'reg-kernel', label: 'কার্নেল রেজিস্টার', kind: 'register', defaultOrientation: 'landscape', defaultSubject: 'কার্নেল (খাদ্যশস্য) বরাদ্দ ও ডিও বিতরণ রেজিস্টার' },
   { id: 'reg-challan', label: 'চালান রেজিস্টার', kind: 'register', defaultOrientation: 'landscape', defaultSubject: 'ট্রেজারি চালান ও গরমিল যাচাই রেজিস্টার' },
   { id: 'monthly-dist', label: 'মাসিক বিতরণ রিপোর্ট', kind: 'report', defaultOrientation: 'portrait', defaultSubject: 'মাস ভিত্তিক ও খাত ভিত্তিক খাদ্য শস্য বিলি আদেশের তথ্য প্রেরণ।' },
   { id: 'alloc-summary', label: 'বরাদ্দ ও বিতরণ স্থিতি', kind: 'report', defaultOrientation: 'portrait', defaultSubject: 'খাত ভিত্তিক প্রাপ্ত বরাদ্দ, উপবরাদ্দ, ডিও ইস্যু ও অবশিষ্ট স্থিতির বিবরণী।' },

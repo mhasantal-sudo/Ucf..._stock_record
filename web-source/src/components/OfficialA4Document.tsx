@@ -813,13 +813,6 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
           </div>
         )}
 
-        {showRecipientBlock && template.recipientLines.trim() && (
-          <div style={{ fontSize: `${fontPt}pt` }} className="mb-1.5 leading-snug whitespace-pre-line">
-            <div className="font-semibold">প্রাপক,</div>
-            <div className="pl-4">{toBnDigits(template.recipientLines)}</div>
-          </div>
-        )}
-
         {(subjectResolved || template.subject) && (
           <div style={{ fontSize: `${fontPt}pt` }} className="mb-1.5 leading-snug">
             <span className="font-bold">বিষয়ঃ </span>
@@ -889,8 +882,9 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
       const showSigArea = showOfficerSignatureBlock;
       const isCopyEnabled = showCopyBlock ?? template.showCopyBlock;
       const showCopyArea = Boolean(isCopyEnabled && template.copyList.trim().length > 0);
+      const showRecipientArea = Boolean(showRecipientBlock && template.recipientLines.trim());
       const hasFooterNote = Boolean(template.footerNote?.trim());
-      if (!showSigArea && !showCopyArea && !hasFooterNote) {
+      if (!showSigArea && !showCopyArea && !showRecipientArea && !hasFooterNote) {
         return <div {...(isMeasure ? { 'data-measure': 'footer' } : {})} />;
       }
 
@@ -925,6 +919,26 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
       );
 
       const sigBox = showSigArea ? renderSigBox(template.signLines) : null;
+      const recipientBox = showRecipientArea ? (
+        <div className="text-left leading-snug whitespace-pre-line max-w-[55%]">
+          <div className="font-semibold">প্রাপক,</div>
+          <div className="pl-4">{toBnDigits(template.recipientLines)}</div>
+        </div>
+      ) : null;
+      const sigAndRecipientRow = (recipientBox || sigBox) && (
+        <div
+          className={`flex items-end gap-6 ${
+            recipientBox && sigBox
+              ? 'justify-between'
+              : sigBox
+                ? 'justify-end'
+                : 'justify-start'
+          }`}
+        >
+          {recipientBox}
+          {sigBox}
+        </div>
+      );
       const copySigBox =
         showCopyArea && template.showCopySignature !== false
           ? renderSigBox(template.copySignLines || template.signLines)
@@ -989,11 +1003,11 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
         >
           {showCopyArea ? (
             <div className="space-y-3">
-              {sigBox && <div className="flex justify-end">{sigBox}</div>}
+              {sigAndRecipientRow}
               {copyBox}
             </div>
           ) : (
-            sigBox && <div className="flex justify-end">{sigBox}</div>
+            sigAndRecipientRow
           )}
 
           {hasFooterNote && (

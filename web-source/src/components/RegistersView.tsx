@@ -58,6 +58,7 @@ const REGISTER_ICON_META: Record<
   'reg-kab-spc-rice': { icon: Hammer, bg: 'bg-emerald-50 border-emerald-200', fg: 'text-emerald-700' },
   'reg-kab-spc-wheat': { icon: Hammer, bg: 'bg-amber-50 border-amber-200', fg: 'text-amber-800' },
   'reg-vwb': { icon: Users, bg: 'bg-purple-50 border-purple-200', fg: 'text-purple-700' },
+  'reg-kernel': { icon: Wheat, bg: 'bg-emerald-50 border-emerald-200', fg: 'text-emerald-700' },
   'reg-challan': { icon: Receipt, bg: 'bg-slate-100 border-slate-300', fg: 'text-slate-700' },
 };
 

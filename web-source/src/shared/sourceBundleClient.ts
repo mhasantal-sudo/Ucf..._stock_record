@@ -20,6 +20,12 @@ import {
   type AndroidAppConfig,
 } from './androidConfig';
 import { getApiBaseOrigin } from './googleAuth';
+import {
+  pushFilesToGitHub,
+  utf8ToBase64,
+  type GitHubFileEntry,
+  type GitHubPushResult,
+} from './githubPush';
 
 export interface SourceFileItem {
   path: string;
@@ -211,5 +217,57 @@ export async function buildFilesZipFromList(files: SourceFileItem[]): Promise<Bl
     type: 'blob',
     compression: 'DEFLATE',
     compressionOptions: { level: 6 },
+  });
+}
+
+export async function pushSourceToGitHubClientFallback(params: {
+  token: string;
+  repository: string;
+  branch?: string;
+  scope: 'full' | 'web';
+  commitMessage?: string;
+  autoCreateRepo?: boolean;
+  isPrivateRepo?: boolean;
+  appName?: string;
+  packageName?: string;
+  onProgress?: (phase: string, done: number, total: number) => void;
+}): Promise<GitHubPushResult> {
+  params.onProgress?.('সোর্স ফাইল সংগ্রহ করা হচ্ছে...', 0, 1);
+  const webFiles = await fetchWebSourceFilesWithFallback();
+  const githubFiles: GitHubFileEntry[] = webFiles.map((f) => ({
+    path: f.path,
+    base64Content: utf8ToBase64(f.content),
+  }));
+
+  if (params.scope === 'full') {
+    const androidFiles = await fetchAndroidSourceFilesWithFallback(
+      params.appName,
+      params.packageName
+    );
+    for (const f of androidFiles) {
+      githubFiles.push({
+        path: `android/${f.path}`,
+        base64Content: utf8ToBase64(f.content),
+      });
+    }
+    const wf = androidFiles.find((f) => f.path === '.github/workflows/build-apk.yml');
+    if (wf) {
+      githubFiles.push({
+        path: '.github/workflows/build-apk.yml',
+        base64Content: utf8ToBase64(wf.content),
+      });
+    }
+  }
+
+  return pushFilesToGitHub({
+    token: params.token,
+    repository: params.repository,
+    branch: params.branch,
+    commitMessage: params.commitMessage,
+    autoCreateRepo: params.autoCreateRepo,
+    isPrivateRepo: params.isPrivateRepo,
+    cleanTree: params.scope === 'full',
+    files: githubFiles,
+    onProgress: params.onProgress,
   });
 }

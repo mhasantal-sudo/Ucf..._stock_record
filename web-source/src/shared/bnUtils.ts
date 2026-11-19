@@ -153,6 +153,37 @@ export function normMemoNo(input: string | number | null | undefined): string {
     .toLowerCase();
 }
 
+export function normChallanNo(input: string | number | null | undefined): string {
+  let s = bnToEnDigits(String(input ?? ''))
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .trim()
+    .replace(/^'+/, '')
+    .replace(/[–—]/g, '-')
+    .replace(/\s+/g, '')
+    .toLowerCase();
+  if (!s) return '';
+  if (
+    /^[-_.]+$/.test(s) ||
+    s === 'n/a' ||
+    s === 'na' ||
+    s === 'none' ||
+    s === 'nil' ||
+    s === 'null' ||
+    s === 'undefined' ||
+    s === 'নেই' ||
+    s === 'নাই'
+  ) {
+    return '';
+  }
+  const floatInt = s.match(/^(\d+)\.0+$/);
+  if (floatInt) s = floatInt[1];
+  if (/^0+\d+$/.test(s)) {
+    s = s.replace(/^0+(?=\d)/, '');
+  }
+  if (/^0+$/.test(s)) return '';
+  return s;
+}
+
 export function isFireServiceLabel(input: string | null | undefined): boolean {
   const s = bnToEnDigits(String(input ?? ''))
     .normalize('NFC')

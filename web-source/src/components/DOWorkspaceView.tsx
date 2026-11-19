@@ -31,6 +31,7 @@ import {
   formatBnQty,
   isChallanOnOrBeforeDo,
   isSamePartyName,
+  normChallanNo,
   normMemoNo,
   parseNum,
   round3,
@@ -64,6 +65,7 @@ interface DOWorkspaceViewProps {
       subId?: string;
       unoDate?: string;
       unoMemo?: string;
+      ministryMemo?: string;
       issueDate?: string;
       excludeDoId?: string;
       excludeChallanIds?: Set<string>;
@@ -209,12 +211,32 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
     [unusedList]
   );
 
+  const ministryGrainByKey = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const m of db.ministryAllocations) {
+      map.set(`${m.category}::${m.memoNo}`, m.grain);
+      const nm = normMemoNo(m.memoNo);
+      if (nm) map.set(`${m.category}::${nm}`, m.grain);
+    }
+    return map;
+  }, [db.ministryAllocations]);
+
+  const resolveItemGrain = (category: AllocationCategory, ministryMemo?: string): string => {
+    if (!ministryMemo) return '';
+    return (
+      ministryGrainByKey.get(`${category}::${ministryMemo}`) ||
+      ministryGrainByKey.get(`${category}::${normMemoNo(ministryMemo)}`) ||
+      ''
+    );
+  };
+
   const pendingGroups = useMemo(() => {
     const groups: Array<{
       groupKey: string;
       category: AllocationCategory;
       unoMemo: string;
       unoDate: string;
+      grains: string[];
       items: typeof filteredPending;
       totalRemaining: number;
     }> = [];
@@ -228,17 +250,20 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
           category: item.category,
           unoMemo: item.unoMemo,
           unoDate: item.unoDate,
+          grains: [],
           items: [],
           totalRemaining: 0,
         };
         byKey.set(groupKey, grp);
         groups.push(grp);
       }
+      const g = resolveItemGrain(item.category, item.ministryMemo);
+      if (g && !grp.grains.includes(g)) grp.grains.push(g);
       grp.items.push(item);
       grp.totalRemaining = round3(grp.totalRemaining + item.remaining);
     }
     return groups;
-  }, [filteredPending]);
+  }, [filteredPending, ministryGrainByKey]);
 
   const previewChecksByKey = useMemo(() => {
     const map = new Map<string, ReturnType<typeof verifyChallan>>();
@@ -262,6 +287,7 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
         subId: p.subId,
         unoDate: p.unoDate,
         unoMemo: p.unoMemo,
+        ministryMemo: p.ministryMemo,
         issueDate: targetDate,
         excludeChallanIds: usedIds,
       });
@@ -786,6 +812,11 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
                       <div className="bg-slate-50 border-b border-slate-200 px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
                         <div className="flex flex-wrap items-center gap-x-2 gap-y-1 font-bold text-slate-900">
                           <span className="text-[#E2136E]">{grp.category}</span>
+                          {grp.grains.includes('কার্নেল') && (
+                            <span className="inline-flex items-center rounded-full border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-[10.5px] font-bold text-emerald-900">
+                              কার্নেল
+                            </span>
+                          )}
                           <span className="text-slate-400">·</span>
                           <span>
                             স্মারক নং {grp.unoMemo ? toBnDigits(grp.unoMemo) : '—'}
@@ -842,6 +873,7 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
                                   subId: p.subId,
                                   unoDate: p.unoDate,
                                   unoMemo: p.unoMemo,
+                                  ministryMemo: p.ministryMemo,
                                   issueDate: rowDraft.date || doBatchDate,
                                 });
                               const isChecked = Boolean(rowDraft.doNo.trim());
@@ -860,7 +892,14 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
                                       />
                                     </td>
                                     <td className="py-2 px-2.5">
-                                      <div className="font-bold text-slate-900">{p.recipientName}</div>
+                                      <div className="font-bold text-slate-900 flex flex-wrap items-center gap-1.5">
+                                        <span>{p.recipientName}</span>
+                                        {resolveItemGrain(p.category, p.ministryMemo) === 'কার্নেল' && (
+                                          <span className="inline-flex items-center rounded-full border border-emerald-300 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-bold text-emerald-900">
+                                            কার্নেল
+                                          </span>
+                                        )}
+                                      </div>
                                       <div className="text-[11px] text-slate-500">
                                         {p.unionName}
                                         {p.salesCenter ? ` · ${p.salesCenter}` : ''}
@@ -1041,7 +1080,14 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
                               </>
                             )}
                           </td>
-                          <td className="py-2 px-3 font-semibold">{d.category}</td>
+                          <td className="py-2 px-3 font-semibold">
+                            <div>{d.category}</div>
+                            {resolveItemGrain(d.category, d.ministryMemo) === 'কার্নেল' && (
+                              <span className="inline-flex items-center rounded-full border border-emerald-300 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-bold text-emerald-900 mt-0.5">
+                                কার্নেল
+                              </span>
+                            )}
+                          </td>
                           <td className="py-2 px-3">
                             <div className="font-bold text-slate-900">{d.recipientName}</div>
                             <div className="text-[11px] text-slate-500">{d.unionName}</div>
@@ -1073,7 +1119,7 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
                                 ? db.challans.find(
                                     (c) =>
                                       c.challanType === 'মূল চালান' &&
-                                      normMemoNo(c.challanNo) === normMemoNo(d.challanNo) &&
+                                      normChallanNo(c.challanNo) === normChallanNo(d.challanNo) &&
                                       validForDo(c)
                                   )
                                 : db.challans.find(
@@ -1087,7 +1133,7 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
                                 ? db.challans.find(
                                     (c) =>
                                       c.challanType === 'আয়কর চালান' &&
-                                      normMemoNo(c.challanNo) === normMemoNo(d.taxChallanNo) &&
+                                      normChallanNo(c.challanNo) === normChallanNo(d.taxChallanNo) &&
                                       validForDo(c)
                                   )
                                 : db.challans.find(

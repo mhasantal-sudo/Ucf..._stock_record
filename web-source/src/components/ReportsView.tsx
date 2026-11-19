@@ -30,6 +30,7 @@ import {
   buildEPRationReport,
   buildFoodAllocOrderMemos,
   buildFoodAllocOrderRows,
+  buildFoodKernelMemos,
   buildMonthlyDistributionReport,
   getDoBookRegisterStats,
   getUnusedDoNumbers,
@@ -42,6 +43,7 @@ import {
   formatBnQty,
   isChallanOnOrBeforeDo,
   isSamePartyName,
+  normChallanNo,
   normMemoNo,
   round2,
   round3,
@@ -196,6 +198,9 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
   const [year, setYear] = useState(now.getFullYear());
   const [catFilter, setCatFilter] = useState('ALL');
   const [selectedFoodMemo, setSelectedFoodMemo] = useState('');
+  const [foodKernelMode, setFoodKernelMode] = useState<'without_kernel' | 'with_kernel'>('without_kernel');
+  const [selectedKernelMemo, setSelectedKernelMemo] = useState('PERCENT');
+  const [kernelPercentInput, setKernelPercentInput] = useState('1');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [bookFilter, setBookFilter] = useState('ALL');
@@ -281,6 +286,11 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
     [db, month0, year]
   );
 
+  const foodKernelMemos = useMemo(
+    () => buildFoodKernelMemos(db, month0, year),
+    [db, month0, year]
+  );
+
   useEffect(() => {
     if (foodMemos.length > 0 && !foodMemos.some((m) => m.memo === selectedFoodMemo)) {
       setSelectedFoodMemo(foodMemos[0].memo);
@@ -288,6 +298,16 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
       setSelectedFoodMemo('');
     }
   }, [foodMemos, selectedFoodMemo]);
+
+  useEffect(() => {
+    if (
+      selectedKernelMemo !== 'PERCENT' &&
+      !foodKernelMemos.some((k) => k.memo === selectedKernelMemo)
+    ) {
+      const sameMonthKernel = foodKernelMemos.find((k) => k.sameMonth);
+      setSelectedKernelMemo(sameMonthKernel ? sameMonthKernel.memo : 'PERCENT');
+    }
+  }, [foodKernelMemos, selectedKernelMemo]);
 
   const memoKey =
     activeReportId === 'alloc-food'
@@ -329,21 +349,38 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
       const cPrevR: DocColumnLeaf = { key: 'pr', label: colLabel('pr', 'চাল'), align: 'right' };
       const cPrevW: DocColumnLeaf = { key: 'pw', label: colLabel('pw', 'গম'), align: 'right' };
       const cPrevA: DocColumnLeaf = { key: 'pa', label: colLabel('pa', 'আটা'), align: 'right' };
+      const cPrevK: DocColumnLeaf = { key: 'pk', label: colLabel('pk', 'কার্নেল'), align: 'right' };
       const cCurR: DocColumnLeaf = { key: 'cr', label: colLabel('cr', 'চাল'), align: 'right' };
       const cCurW: DocColumnLeaf = { key: 'cw', label: colLabel('cw', 'গম'), align: 'right' };
       const cCurA: DocColumnLeaf = { key: 'ca', label: colLabel('ca', 'আটা'), align: 'right' };
+      const cCurK: DocColumnLeaf = { key: 'ck', label: colLabel('ck', 'কার্নেল'), align: 'right' };
       const cTotR: DocColumnLeaf = { key: 'tr', label: colLabel('tr', 'চাল'), align: 'right' };
       const cTotW: DocColumnLeaf = { key: 'tw', label: colLabel('tw', 'গম'), align: 'right' };
       const cTotA: DocColumnLeaf = { key: 'ta', label: colLabel('ta', 'আটা'), align: 'right' };
+      const cTotK: DocColumnLeaf = { key: 'tk', label: colLabel('tk', 'কার্নেল'), align: 'right' };
       const cCat: DocColumnLeaf = { key: 'cat', label: colLabel('cat', 'খাতের নাম'), align: 'left' };
 
       const columns: DocColumnGroup[] = [
         { label: colLabel('cat', 'খাতের নাম'), leaf: cCat },
-        { label: `পূর্ববর্তী ক্রমপুঞ্জিত (${rep.fiscalYear})`, children: [cPrevR, cPrevW, cPrevA] },
-        { label: `বর্তমান মাস (${rep.monthName} ${yrBn})`, children: [cCurR, cCurW, cCurA] },
-        { label: 'বর্তমান ক্রমপুঞ্জিত', children: [cTotR, cTotW, cTotA] },
+        { label: `পূর্ববর্তী ক্রমপুঞ্জিত (${rep.fiscalYear})`, children: [cPrevR, cPrevW, cPrevA, cPrevK] },
+        { label: `বর্তমান মাস (${rep.monthName} ${yrBn})`, children: [cCurR, cCurW, cCurA, cCurK] },
+        { label: 'বর্তমান ক্রমপুঞ্জিত', children: [cTotR, cTotW, cTotA, cTotK] },
       ];
-      const leaves = [cCat, cPrevR, cPrevW, cPrevA, cCurR, cCurW, cCurA, cTotR, cTotW, cTotA];
+      const leaves = [
+        cCat,
+        cPrevR,
+        cPrevW,
+        cPrevA,
+        cPrevK,
+        cCurR,
+        cCurW,
+        cCurA,
+        cCurK,
+        cTotR,
+        cTotW,
+        cTotA,
+        cTotK,
+      ];
       const rows: DocRowData[] = rep.rows.map((r) => ({
         id: r.category,
         cells: {
@@ -351,12 +388,15 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
           pr: formatBnQty(r.previousRice),
           pw: formatBnQty(r.previousWheat),
           pa: formatBnQty(r.previousAtta),
+          pk: formatBnQty(r.previousKernel),
           cr: formatBnQty(r.currentRice),
           cw: formatBnQty(r.currentWheat),
           ca: formatBnQty(r.currentAtta),
+          ck: formatBnQty(r.currentKernel),
           tr: formatBnQty(r.cumulativeRice),
           tw: formatBnQty(r.cumulativeWheat),
           ta: formatBnQty(r.cumulativeAtta),
+          tk: formatBnQty(r.cumulativeKernel),
         },
         hasSignature: false,
       }));
@@ -367,12 +407,15 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
           pr: formatBnQty(rep.totals.previousRice),
           pw: formatBnQty(rep.totals.previousWheat),
           pa: formatBnQty(rep.totals.previousAtta),
+          pk: formatBnQty(rep.totals.previousKernel),
           cr: formatBnQty(rep.totals.currentRice),
           cw: formatBnQty(rep.totals.currentWheat),
           ca: formatBnQty(rep.totals.currentAtta),
+          ck: formatBnQty(rep.totals.currentKernel),
           tr: formatBnQty(rep.totals.cumulativeRice),
           tw: formatBnQty(rep.totals.cumulativeWheat),
           ta: formatBnQty(rep.totals.cumulativeAtta),
+          tk: formatBnQty(rep.totals.cumulativeKernel),
         },
       };
       return {
@@ -383,7 +426,22 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
         mergeDepth: 0,
         showSerialCol: true,
         serialColLabel: 'ক্রম',
-        colWidths: ['5%', '22%', '8%', '8%', '8%', '8%', '8%', '8%', '8%', '8%', '9%'],
+        colWidths: [
+          '4%',
+          '18%',
+          '6.5%',
+          '6.5%',
+          '6.5%',
+          '6.5%',
+          '6.5%',
+          '6.5%',
+          '6.5%',
+          '6.5%',
+          '6.5%',
+          '6.5%',
+          '6.5%',
+          '6.5%',
+        ],
         tableLayoutFixed: true,
         rows,
         totalRow,
@@ -580,35 +638,69 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
     }
 
     if (activeReportId === 'alloc-food') {
-      const ord = buildFoodAllocOrderRows(db, month0, year, selectedFoodMemo);
-      const leaves: DocColumnLeaf[] = [
-        { key: 'union', label: colLabel('union', 'ইউনিয়ন'), align: 'center' },
-        { key: 'serial', label: colLabel('serial', 'ক্রমিক'), align: 'center' },
-        { key: 'center', label: colLabel('center', 'বিক্রয় কেন্দ্র'), align: 'left' },
-        { key: 'dealer', label: colLabel('dealer', 'ডিলারের নাম'), align: 'left' },
-        { key: 'mobile', label: colLabel('mobile', 'মোবাইল'), align: 'center' },
-        { key: 'cards', label: colLabel('cards', 'কার্ড'), align: 'center' },
-        { key: 'qty', label: colLabel('qty', 'পরিমাণ'), align: 'right' },
-        { key: 'amount', label: colLabel('amount', 'টাকা'), align: 'right' },
-        { key: 'tax', label: colLabel('tax', 'আয়কর'), align: 'right' },
-      ];
+      const includeKernel = foodKernelMode === 'with_kernel';
+      const kernelPct = Math.max(0, Number(kernelPercentInput) || 0);
+      const ord = buildFoodAllocOrderRows(db, month0, year, selectedFoodMemo, {
+        includeKernel,
+        kernelMemo: includeKernel ? selectedKernelMemo : undefined,
+        kernelPercent:
+          includeKernel && selectedKernelMemo === 'PERCENT' ? kernelPct : undefined,
+      });
+
+      const leaves: DocColumnLeaf[] = includeKernel
+        ? [
+            { key: 'union', label: colLabel('union', 'ইউনিয়ন'), align: 'center' },
+            { key: 'serial', label: colLabel('serial', 'ক্রমিক'), align: 'center' },
+            { key: 'center', label: colLabel('center', 'বিক্রয় কেন্দ্র'), align: 'left' },
+            { key: 'dealer', label: colLabel('dealer', 'ডিলারের নাম'), align: 'left' },
+            { key: 'mobile', label: colLabel('mobile', 'মোবাইল'), align: 'center' },
+            { key: 'cards', label: colLabel('cards', 'কার্ড'), align: 'center' },
+            { key: 'qtyWithoutKernel', label: colLabel('qtyWithoutKernel', 'কার্নেল ছাড়া পরিমাণ'), align: 'right' },
+            { key: 'kernelQty', label: colLabel('kernelQty', 'কার্নেল'), align: 'right' },
+            { key: 'qtyWithKernel', label: colLabel('qtyWithKernel', 'কার্নেল সহ পরিমাণ'), align: 'right' },
+            { key: 'amount', label: colLabel('amount', 'টাকা'), align: 'right' },
+            { key: 'tax', label: colLabel('tax', 'আয়কর'), align: 'right' },
+          ]
+        : [
+            { key: 'union', label: colLabel('union', 'ইউনিয়ন'), align: 'center' },
+            { key: 'serial', label: colLabel('serial', 'ক্রমিক'), align: 'center' },
+            { key: 'center', label: colLabel('center', 'বিক্রয় কেন্দ্র'), align: 'left' },
+            { key: 'dealer', label: colLabel('dealer', 'ডিলারের নাম'), align: 'left' },
+            { key: 'mobile', label: colLabel('mobile', 'মোবাইল'), align: 'center' },
+            { key: 'cards', label: colLabel('cards', 'কার্ড'), align: 'center' },
+            { key: 'qty', label: colLabel('qty', 'পরিমাণ'), align: 'right' },
+            { key: 'amount', label: colLabel('amount', 'টাকা'), align: 'right' },
+            { key: 'tax', label: colLabel('tax', 'আয়কর'), align: 'right' },
+          ];
+
       const totCards = ord.rows.reduce((s, r) => s + r.cards, 0);
       const totQty = round3(ord.rows.reduce((s, r) => s + r.qty, 0));
+      const totWithoutKernel = round3(ord.rows.reduce((s, r) => s + r.qtyWithoutKernel, 0));
+      const totKernelQty = round3(ord.rows.reduce((s, r) => s + r.kernelQty, 0));
+      const totWithKernel = round3(ord.rows.reduce((s, r) => s + r.qtyWithKernel, 0));
       const totAmt = round2(ord.rows.reduce((s, r) => s + r.amount, 0));
       const totTax = round2(ord.rows.reduce((s, r) => s + r.tax, 0));
 
       let prevUnion = '';
       let unionDealerIdx = 0;
 
+      const baseSubject = resolvePlaceholders(template.subject);
+      const modeTag = includeKernel ? 'কার্নেল সহ' : 'কার্নেল ছাড়া';
+      const subjectWithMode = /কার্নেল/.test(baseSubject)
+        ? baseSubject
+        : `${baseSubject} (${modeTag})`;
+
       return {
-        subjectResolved: resolvePlaceholders(template.subject),
+        subjectResolved: subjectWithMode,
         introResolved: resolvePlaceholders(template.introText),
         columns: leaves.map((l) => ({ label: l.label, leaf: l })),
         leaves,
         mergeDepth: 1,
         showSerialCol: false,
         serialColLabel: 'ক্রমিক',
-        colWidths: ['11%', '6%', '13%', '24%', '12%', '8%', '10%', '9%', '7%'],
+        colWidths: includeKernel
+          ? ['10%', '5%', '11%', '20%', '10%', '6%', '8%', '7%', '8%', '8%', '7%']
+          : ['11%', '6%', '13%', '24%', '12%', '8%', '10%', '9%', '7%'],
         tableLayoutFixed: true,
         footerLayout: 'sign_above_copy',
         rows: ord.rows.map((r, i) => {
@@ -629,7 +721,15 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
               dealer: `${toBnDigits(unionDealerIdx)}। ${template.namePrefix || ''}${r.dealerName}`,
               mobile: toBnDigits(r.mobile || '—'),
               cards: formatBnInt(r.cards),
-              qty: formatBnQty(r.qty),
+              ...(includeKernel
+                ? {
+                    qtyWithoutKernel: formatBnQty(r.qtyWithoutKernel),
+                    kernelQty: formatBnQty(r.kernelQty),
+                    qtyWithKernel: formatBnQty(r.qtyWithKernel),
+                  }
+                : {
+                    qty: formatBnQty(r.qty),
+                  }),
               amount: formatBnMoney(r.amount),
               tax: formatBnMoney(r.tax),
             },
@@ -639,12 +739,21 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
         totalRow: {
           label: template.totalLabel || 'সর্বমোট',
           labelColSpan: 5,
-          values: {
-            cards: formatBnInt(totCards),
-            qty: formatBnQty(totQty),
-            amount: formatBnMoney(totAmt),
-            tax: formatBnMoney(totTax),
-          },
+          values: includeKernel
+            ? {
+                cards: formatBnInt(totCards),
+                qtyWithoutKernel: formatBnQty(totWithoutKernel),
+                kernelQty: formatBnQty(totKernelQty),
+                qtyWithKernel: formatBnQty(totWithKernel),
+                amount: formatBnMoney(totAmt),
+                tax: formatBnMoney(totTax),
+              }
+            : {
+                cards: formatBnInt(totCards),
+                qty: formatBnQty(totQty),
+                amount: formatBnMoney(totAmt),
+                tax: formatBnMoney(totTax),
+              },
         },
         showRecipientBlock: false,
         showIntroBlock: true,
@@ -762,7 +871,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
             ? db.challans.find(
                 (c) =>
                   c.challanType === 'মূল চালান' &&
-                  normMemoNo(c.challanNo) === normMemoNo(d.challanNo) &&
+                  normChallanNo(c.challanNo) === normChallanNo(d.challanNo) &&
                   validForDo(c)
               )
             : db.challans.find(
@@ -776,7 +885,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
             ? db.challans.find(
                 (c) =>
                   c.challanType === 'আয়কর চালান' &&
-                  normMemoNo(c.challanNo) === normMemoNo(d.taxChallanNo) &&
+                  normChallanNo(c.challanNo) === normChallanNo(d.taxChallanNo) &&
                   validForDo(c)
               )
             : db.challans.find(
@@ -1199,25 +1308,109 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
           )}
 
           {activeReportId === 'alloc-food' && (
-            <div>
-              <label className="block text-[11px] font-bold text-slate-600 mb-1">
-                উপবরাদ্দ স্মারক নির্বাচন
-              </label>
-              <select
-                value={selectedFoodMemo}
-                onChange={(e) => setSelectedFoodMemo(e.target.value)}
-                className="w-full min-h-[42px] rounded-xl border border-slate-300 px-3 py-1.5 bg-white font-bold"
-              >
-                {foodMemos.length === 0 ? (
-                  <option value="">নির্বাচিত মাসে কোনো বরাদ্দ নেই</option>
-                ) : (
-                  foodMemos.map((m) => (
-                    <option key={m.memo} value={m.memo}>
-                      {toBnDigits(m.memo)} ({formatBnDate(m.date)} · {formatBnQty(m.totalQty)} মে.টন)
-                    </option>
-                  ))
-                )}
-              </select>
+            <div className="space-y-2.5 pt-1">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                    উপবরাদ্দ স্মারক নির্বাচন
+                  </label>
+                  <select
+                    value={selectedFoodMemo}
+                    onChange={(e) => setSelectedFoodMemo(e.target.value)}
+                    className="w-full min-h-[42px] rounded-xl border border-slate-300 px-3 py-1.5 bg-white font-bold"
+                  >
+                    {foodMemos.length === 0 ? (
+                      <option value="">নির্বাচিত মাসে কোনো বরাদ্দ নেই</option>
+                    ) : (
+                      foodMemos.map((m) => (
+                        <option key={m.memo} value={m.memo}>
+                          {toBnDigits(m.memo)} ({formatBnDate(m.date)} · {formatBnQty(m.totalQty)} মে.টন · {m.grain})
+                        </option>
+                      ))
+                    )}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                    প্রিন্ট ধরন (কার্নেল ছাড়া / কার্নেল সহ)
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setFoodKernelMode('without_kernel')}
+                      className={`min-h-[42px] rounded-xl border px-3 py-1.5 text-xs font-bold cursor-pointer transition-colors ${
+                        foodKernelMode === 'without_kernel'
+                          ? 'bg-[#E2136E] text-white border-[#E2136E] shadow-xs'
+                          : 'bg-white text-slate-800 border-slate-300 hover:bg-rose-50'
+                      }`}
+                    >
+                      কার্নেল ছাড়া
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setFoodKernelMode('with_kernel');
+                        const sameMonthK = foodKernelMemos.find((k) => k.sameMonth);
+                        if (sameMonthK && selectedKernelMemo === 'PERCENT') {
+                          setSelectedKernelMemo(sameMonthK.memo);
+                        }
+                      }}
+                      className={`min-h-[42px] rounded-xl border px-3 py-1.5 text-xs font-bold cursor-pointer transition-colors ${
+                        foodKernelMode === 'with_kernel'
+                          ? 'bg-emerald-700 text-white border-emerald-700 shadow-xs'
+                          : 'bg-white text-slate-800 border-slate-300 hover:bg-emerald-50'
+                      }`}
+                    >
+                      কার্নেল সহ
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {foodKernelMode === 'with_kernel' && (
+                <div className="rounded-xl border border-emerald-200 bg-emerald-50/70 p-3 space-y-2">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 items-end">
+                    <div className="sm:col-span-2">
+                      <label className="block text-[11px] font-bold text-emerald-950 mb-1">
+                        কার্নেলের উৎস (কার্নেল উপবরাদ্দ স্মারক অথবা শতকরা হার)
+                      </label>
+                      <select
+                        value={selectedKernelMemo}
+                        onChange={(e) => setSelectedKernelMemo(e.target.value)}
+                        className="w-full min-h-[40px] rounded-xl border border-emerald-300 px-3 py-1.5 bg-white font-bold text-slate-900"
+                      >
+                        <option value="PERCENT">শতকরা হার (%) দিয়ে হিসাব করুন</option>
+                        {foodKernelMemos.map((k) => (
+                          <option key={k.memo} value={k.memo}>
+                            কার্নেল স্মারক: {toBnDigits(k.memo)} ({formatBnDate(k.date)} · {formatBnQty(k.totalQty)} মে.টন)
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {selectedKernelMemo === 'PERCENT' && (
+                      <div>
+                        <label className="block text-[11px] font-bold text-emerald-950 mb-1">
+                          কার্নেল হার (%)
+                        </label>
+                        <input
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          value={kernelPercentInput}
+                          onChange={(e) => setKernelPercentInput(e.target.value)}
+                          placeholder="যেমন: 1"
+                          className="w-full min-h-[40px] rounded-xl border border-emerald-300 px-3 py-1.5 bg-white font-bold text-right tabular-nums"
+                        />
+                      </div>
+                    )}
+                  </div>
+                  <p className="text-[11px] font-semibold text-emerald-900">
+                    নোট: ছকে «কার্নেল ছাড়া পরিমাণ», «কার্নেল» এবং «কার্নেল সহ পরিমাণ» আলাদাভাবে দেখানো হবে; কিন্তু টাকা ও আয়কর কেবল «কার্নেল ছাড়া পরিমাণ»-এর ওপরই হিসাব হবে (কার্নেলের কোনো টাকা যোগ হবে না)।
+                  </p>
+                </div>
+              )}
             </div>
           )}
 

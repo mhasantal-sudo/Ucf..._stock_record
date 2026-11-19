@@ -29,9 +29,11 @@ import {
 import {
   CATEGORIES,
   CATEGORY_BY_NAME,
+  GRAIN_OPTIONS,
   type AllocationCategory,
   type AllocationDatabase,
   type ChallanRecord,
+  type GrainType,
   type OfficerProfileSettings,
   type RegisterId,
 } from '../types/allocation';
@@ -65,6 +67,8 @@ interface CategoryEntryViewProps {
   db: AllocationDatabase;
   selectedCategory: AllocationCategory;
   lockedStage?: EntryStageKey | null;
+  initialJump?: { memoNo: string; stage?: EntryStageKey } | null;
+  onConsumeInitialJump?: () => void;
   onBack?: () => void;
   onSelectCategory: (cat: AllocationCategory) => void;
   getMinistryUsage: (cat: AllocationCategory, memo: string) => { total: number; used: number; remaining: number };
@@ -74,7 +78,7 @@ interface CategoryEntryViewProps {
     memoNo: string;
     memoDate: string;
     allocationQty: number;
-    grain: 'চাল' | 'গম' | 'আটা';
+    grain: GrainType;
     phase?: number;
     comment?: string;
   }) => ActionResult;
@@ -84,7 +88,7 @@ interface CategoryEntryViewProps {
       memoNo: string;
       memoDate: string;
       allocationQty: number;
-      grain: 'চাল' | 'গম' | 'আটা';
+      grain: GrainType;
       phase?: number;
       comment?: string;
     }
@@ -192,6 +196,7 @@ interface CategoryEntryViewProps {
       subId?: string;
       unoDate?: string;
       unoMemo?: string;
+      ministryMemo?: string;
       issueDate?: string;
       excludeDoId?: string;
       excludeChallanIds?: Set<string>;
@@ -304,6 +309,8 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
   db,
   selectedCategory,
   lockedStage = null,
+  initialJump = null,
+  onConsumeInitialJump,
   onBack,
   onSelectCategory,
   getMinistryUsage,
@@ -357,7 +364,7 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
   const [offMinMemo, setOffMinMemo] = useState('');
   const [offMinDate, setOffMinDate] = useState(todayIsoDate());
   const [offMinQty, setOffMinQty] = useState('');
-  const [offMinGrain, setOffMinGrain] = useState<'চাল' | 'গম' | 'আটা'>(meta.defaultGrain || 'চাল');
+  const [offMinGrain, setOffMinGrain] = useState<GrainType>(meta.defaultGrain || 'চাল');
   const [offMinPhase, setOffMinPhase] = useState('1');
   const [offMinComment, setOffMinComment] = useState('');
 
@@ -403,7 +410,7 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
   const [minMemo, setMinMemo] = useState('');
   const [minDate, setMinDate] = useState(todayIsoDate());
   const [minQty, setMinQty] = useState('');
-  const [minGrain, setMinGrain] = useState<'চাল' | 'গম' | 'আটা'>(meta.defaultGrain || 'চাল');
+  const [minGrain, setMinGrain] = useState<GrainType>(meta.defaultGrain || 'চাল');
   const [minPhase, setMinPhase] = useState('1');
   const [minComment, setMinComment] = useState('');
 
@@ -540,6 +547,20 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
     () => db.rates.find((r) => r.category === selectedCategory) || { unitPrice: 0, taxRate: 0 },
     [db.rates, selectedCategory]
   );
+
+  const subSourceGrain = useMemo<GrainType>(() => {
+    const raw = subSourceMemo.trim();
+    if (!raw) return meta.defaultGrain || 'চাল';
+    const dcRec = meta.requiresDC
+      ? catDCList.find((d) => d.dcMemo === raw || normMemoNo(d.dcMemo) === normMemoNo(raw))
+      : undefined;
+    const minMemo = dcRec ? dcRec.ministryMemo : raw;
+    const minRec = catMinistryList.find(
+      (m) => m.memoNo === minMemo || normMemoNo(m.memoNo) === normMemoNo(minMemo)
+    );
+    return minRec?.grain || meta.defaultGrain || 'চাল';
+  }, [subSourceMemo, meta, catDCList, catMinistryList]);
+  const isSubKernel = subSourceGrain === 'কার্নেল';
 
   const hasEmbeddedDo = Boolean(
     onSaveDOBook &&
@@ -720,12 +741,29 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
     setEntryMode('category');
     window.requestAnimationFrame(() => scrollToStep(nextStep, true));
 
-    setDcMinMemo(firstAvailMin);
-    setInspectedMinMemo(firstAvailMin || catMinistryList[0]?.memoNo || '');
+    setDcMinMemo(initialJump?.memoNo && meta.requiresDC ? initialJump.memoNo : firstAvailMin);
+    setInspectedMinMemo(
+      (initialJump?.memoNo && meta.requiresDC ? initialJump.memoNo : firstAvailMin) ||
+        catMinistryList[0]?.memoNo ||
+        ''
+    );
     setExtraProjectDcMemo(firstAvailDc || catDCList[0]?.dcMemo || '');
-    setSubSourceMemo(defaultSubMemo);
-    setInspectedSubSourceMemo(defaultSubMemo);
+    const jumpedSub = initialJump?.memoNo && !meta.requiresDC ? initialJump.memoNo : defaultSubMemo;
+    setSubSourceMemo(jumpedSub);
+    setInspectedSubSourceMemo(jumpedSub);
   }, [selectedCategory, lockedStage]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!initialJump?.memoNo) return;
+    if (meta.requiresDC) {
+      setDcMinMemo(initialJump.memoNo);
+      setInspectedMinMemo(initialJump.memoNo);
+    } else {
+      setSubSourceMemo(initialJump.memoNo);
+      setInspectedSubSourceMemo(initialJump.memoNo);
+    }
+    onConsumeInitialJump?.();
+  }, [initialJump, meta.requiresDC, onConsumeInitialJump]);
 
   // Auto-select first available source memo if it loads asynchronously after mount
   useEffect(() => {
@@ -1550,8 +1588,8 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
             cardCount: st.cards,
             unusedCards: st.unused,
             allocationQty: qty,
-            totalAmount: round2(qty * catRate.unitPrice),
-            taxAmount: round2(qty * catRate.taxRate),
+            totalAmount: isSubKernel ? 0 : round2(qty * catRate.unitPrice),
+            taxAmount: isSubKernel ? 0 : round2(qty * catRate.taxRate),
           };
         });
       const res = onSaveDealerBatch({
@@ -1578,8 +1616,8 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
             cardCount: 0,
             unusedCards: 0,
             allocationQty: qty,
-            totalAmount: round2(qty * catRate.unitPrice),
-            taxAmount: round2(qty * catRate.taxRate),
+            totalAmount: isSubKernel ? 0 : round2(qty * catRate.unitPrice),
+            taxAmount: isSubKernel ? 0 : round2(qty * catRate.taxRate),
           };
         });
       const res = onSaveDealerBatch({
@@ -1610,8 +1648,8 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
             cardCount: 0,
             unusedCards: 0,
             allocationQty: qty,
-            totalAmount: round2(qty * rate),
-            taxAmount: round2(qty * catRate.taxRate),
+            totalAmount: isSubKernel ? 0 : round2(qty * rate),
+            taxAmount: isSubKernel ? 0 : round2(qty * catRate.taxRate),
           };
         });
       const res = onSaveDealerBatch({
@@ -2362,15 +2400,17 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                   </div>
                   <div className="grid grid-cols-2 gap-2.5">
                     <div>
-                      <label className="block font-bold text-slate-700 mb-1">খাদ্যশস্য</label>
+                      <label className="block font-bold text-slate-700 mb-1">পণ্যের ক্যাটাগরি</label>
                       <select
                         value={offMinGrain}
-                        onChange={(e) => setOffMinGrain(e.target.value as 'চাল' | 'গম' | 'আটা')}
+                        onChange={(e) => setOffMinGrain(e.target.value as GrainType)}
                         className="w-full rounded-lg border border-slate-300 px-3 py-2 bg-white"
                       >
-                        <option value="চাল">চাল</option>
-                        <option value="গম">গম</option>
-                        <option value="আটা">আটা</option>
+                        {GRAIN_OPTIONS.map((g) => (
+                          <option key={g} value={g}>
+                            {g}
+                          </option>
+                        ))}
                       </select>
                     </div>
                     {CATEGORY_BY_NAME[offMinCat]?.hasPhase && (
@@ -2454,7 +2494,15 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                                 <div className="font-semibold text-slate-900">{toBnDigits(m.memoNo)}</div>
                                 <div className="text-[11px] text-slate-500">{formatBnDate(m.memoDate)}</div>
                               </td>
-                              <td className="py-2 px-3 text-center">{m.grain}</td>
+                              <td className="py-2 px-3 text-center">
+                                {m.grain === 'কার্নেল' ? (
+                                  <span className="inline-flex items-center rounded-full border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-[11px] font-bold text-emerald-900">
+                                    {m.grain}
+                                  </span>
+                                ) : (
+                                  m.grain
+                                )}
+                              </td>
                               <td className="py-2 px-3 text-right font-semibold">{formatBnQty(usage.total)}</td>
                               <td className={`py-2 px-3 text-right font-bold ${hasRem ? 'text-[#E2136E]' : 'text-slate-400'}`}>
                                 {hasRem ? formatBnQty(usage.remaining) : '০.০০০'}
@@ -3123,15 +3171,17 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
 
                   <div className="grid grid-cols-2 gap-2.5">
                     <div>
-                      <label className="block font-bold text-slate-700 mb-1">খাদ্যশস্য</label>
+                      <label className="block font-bold text-slate-700 mb-1">পণ্যের ক্যাটাগরি</label>
                       <select
                         value={minGrain}
-                        onChange={(e) => setMinGrain(e.target.value as 'চাল' | 'গম' | 'আটা')}
+                        onChange={(e) => setMinGrain(e.target.value as GrainType)}
                         className="w-full rounded-lg border border-slate-300 px-3 py-2 bg-white focus:outline-none focus:border-[#E2136E]"
                       >
-                        <option value="চাল">চাল</option>
-                        <option value="গম">গম</option>
-                        <option value="আটা">আটা</option>
+                        {GRAIN_OPTIONS.map((g) => (
+                          <option key={g} value={g}>
+                            {g}
+                          </option>
+                        ))}
                       </select>
                     </div>
                     {meta.hasPhase && (
@@ -3211,7 +3261,15 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                                   {m.comment ? ` · ${m.comment}` : ''}
                                 </div>
                               </td>
-                              <td className="py-2 px-3 text-center">{m.grain}</td>
+                              <td className="py-2 px-3 text-center">
+                                {m.grain === 'কার্নেল' ? (
+                                  <span className="inline-flex items-center rounded-full border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-[11px] font-bold text-emerald-900">
+                                    {m.grain}
+                                  </span>
+                                ) : (
+                                  m.grain
+                                )}
+                              </td>
                               <td className="py-2 px-3 text-right font-semibold">{formatBnQty(usage.total)}</td>
                               <td className="py-2 px-3 text-right text-slate-600">{formatBnQty(usage.used)}</td>
                               <td
@@ -3334,7 +3392,7 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                           const u = getMinistryUsage(selectedCategory, m.memoNo);
                           return (
                             <option key={m.id} value={m.memoNo}>
-                              {toBnDigits(m.memoNo)} (অবশিষ্ট: {formatBnQty(u.remaining)} মে.টন)
+                              {toBnDigits(m.memoNo)} [{m.grain}] (অবশিষ্ট: {formatBnQty(u.remaining)} মে.টন)
                             </option>
                           );
                         })}
@@ -4374,6 +4432,9 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                             {meta.requiresDC
                               ? catDCList.map((d) => {
                                   const u = getDCUsage(selectedCategory, d.dcMemo);
+                                  const minRec = catMinistryList.find((m) =>
+                                    memosLikelyMatch(m.memoNo, d.ministryMemo)
+                                  );
                                   const pendingCnt = meta.supportsProjects
                                     ? computeEnrichedProjects(db, {
                                         category: selectedCategory,
@@ -4383,7 +4444,8 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                                     : 0;
                                   return (
                                     <option key={d.id} value={d.dcMemo}>
-                                      মন্ত্রণালয়: {toBnDigits(d.ministryMemo)} · ডিসি: {toBnDigits(d.dcMemo)} (অবশিষ্ট: {formatBnQty(u.remaining)} মে.টন
+                                      মন্ত্রণালয়: {toBnDigits(d.ministryMemo)}
+                                      {minRec?.grain ? ` [${minRec.grain}]` : ''} · ডিসি: {toBnDigits(d.dcMemo)} (অবশিষ্ট: {formatBnQty(u.remaining)} মে.টন
                                       {meta.supportsProjects ? ` · ${toBnDigits(pendingCnt)}টি পেন্ডিং` : ''})
                                     </option>
                                   );
@@ -4392,7 +4454,7 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                                   const u = getMinistryUsage(selectedCategory, m.memoNo);
                                   return (
                                     <option key={m.id} value={m.memoNo}>
-                                      স্মারক: {toBnDigits(m.memoNo)} · {formatBnDate(m.memoDate)} (অবশিষ্ট: {formatBnQty(u.remaining)} মে.টন)
+                                      স্মারক: {toBnDigits(m.memoNo)} · [{m.grain}] · {formatBnDate(m.memoDate)} (অবশিষ্ট: {formatBnQty(u.remaining)} মে.টন)
                                     </option>
                                   );
                                 })}
@@ -4825,10 +4887,10 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                                               />
                                             </td>
                                             <td className="py-1.5 px-2.5 text-right">
-                                              {formatBnMoney(q * catRate.unitPrice)}
+                                              {isSubKernel ? '০.০০ (কার্নেল)' : formatBnMoney(q * catRate.unitPrice)}
                                             </td>
                                             <td className="py-1.5 px-2.5 text-right">
-                                              {formatBnMoney(q * catRate.taxRate)}
+                                              {isSubKernel ? '০.০০ (কার্নেল)' : formatBnMoney(q * catRate.taxRate)}
                                             </td>
                                           </tr>
                                         );
@@ -4973,11 +5035,11 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                                               />
                                             </td>
                                             <td className="py-1.5 px-2.5 text-right">
-                                              {formatBnMoney(q * catRate.unitPrice)}
+                                              {isSubKernel ? '০.০০ (কার্নেল)' : formatBnMoney(q * catRate.unitPrice)}
                                             </td>
                                             {catRate.taxRate > 0 && (
                                               <td className="py-1.5 px-2.5 text-right">
-                                                {formatBnMoney(q * catRate.taxRate)}
+                                                {isSubKernel ? '০.০০ (কার্নেল)' : formatBnMoney(q * catRate.taxRate)}
                                               </td>
                                             )}
                                           </tr>
@@ -5054,7 +5116,7 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                                             />
                                           </td>
                                           <td className="py-1.5 px-2.5 text-right font-semibold">
-                                            {formatBnMoney(parseNum(st.qty) * rate)}
+                                            {isSubKernel ? '০.০০ (কার্নেল)' : formatBnMoney(parseNum(st.qty) * rate)}
                                           </td>
                                         </tr>
                                       );

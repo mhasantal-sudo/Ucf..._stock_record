@@ -8,9 +8,12 @@ import {
   Copy,
   Download,
   ExternalLink,
+  Eye,
+  EyeOff,
   FileCode2,
   FileSpreadsheet,
   FolderGit2,
+  History,
   ImagePlus,
   Pencil,
   PenTool,
@@ -18,7 +21,9 @@ import {
   RefreshCw,
   RotateCcw,
   Search,
+  ShieldCheck,
   Sliders,
+  Sparkles,
   Trash2,
   Upload,
   Users,
@@ -30,6 +35,7 @@ import {
   createDefaultTemplate,
   type AllocationCategory,
   type AllocationDatabase,
+  type AllocationDbSnapshot,
   type AllocationSheetsConfig,
   type ChairmanEntry,
   type FireServiceEntry,
@@ -57,7 +63,11 @@ import { triggerBlobDownload } from '../shared/downloadUtils';
 import { extractSpreadsheetId } from '../shared/googleSheetsSync';
 import { formatBnInt, formatBnMoney, formatBnQty, parseNum, toBnDigits } from '../shared/bnUtils';
 import type { ActionResult, SheetSyncUiState } from '../store/useAllocationStore';
-import { buildSourceZipClientFallback } from '../shared/sourceBundleClient';
+import type { GitHubPushResult } from '../shared/githubPush';
+import {
+  buildSourceZipClientFallback,
+  pushSourceToGitHubClientFallback,
+} from '../shared/sourceBundleClient';
 import { GoogleSignInButton } from './GoogleSignInButton';
 import { SourceCodeCopyModal } from './SourceCodeCopyModal';
 
@@ -106,6 +116,10 @@ interface AllocationSettingsViewProps {
   onSaveRate: (cat: AllocationCategory, unitPrice: number, taxRate: number) => void;
   onExportBackup: () => void;
   onImportBackup: (jsonText: string) => ActionResult;
+  snapshots?: AllocationDbSnapshot[];
+  onRecoverAndCleanChallans?: (pastedTableText?: string) => ActionResult;
+  onRecoverChallansFromSnapshot?: (snapshotId: string) => ActionResult;
+  onRestoreFullSnapshot?: (snapshotId: string) => ActionResult;
   onClearLocalData: () => void;
 }
 
@@ -117,12 +131,15 @@ const REPORT_DEFAULT_COLUMNS: Record<string, Array<{ key: string; label: string 
     { key: 'pr', label: 'পূর্ববর্তী (চাল)' },
     { key: 'pw', label: 'পূর্ববর্তী (গম)' },
     { key: 'pa', label: 'পূর্ববর্তী (আটা)' },
+    { key: 'pk', label: 'পূর্ববর্তী (কার্নেল)' },
     { key: 'cr', label: 'বর্তমান মাস (চাল)' },
     { key: 'cw', label: 'বর্তমান মাস (গম)' },
     { key: 'ca', label: 'বর্তমান মাস (আটা)' },
+    { key: 'ck', label: 'বর্তমান মাস (কার্নেল)' },
     { key: 'tr', label: 'মোট (চাল)' },
     { key: 'tw', label: 'মোট (গম)' },
     { key: 'ta', label: 'মোট (আটা)' },
+    { key: 'tk', label: 'মোট (কার্নেল)' },
   ],
   'alloc-summary': [
     { key: 'cat', label: 'খাতের নাম' },
@@ -156,7 +173,10 @@ const REPORT_DEFAULT_COLUMNS: Record<string, Array<{ key: string; label: string 
     { key: 'dealer', label: 'ডিলারের নাম' },
     { key: 'mobile', label: 'মোবাইল' },
     { key: 'cards', label: 'কার্ড' },
-    { key: 'qty', label: 'পরিমাণ' },
+    { key: 'qty', label: 'পরিমাণ (কার্নেল ছাড়া প্রিন্টে)' },
+    { key: 'qtyWithoutKernel', label: 'কার্নেল ছাড়া পরিমাণ' },
+    { key: 'kernelQty', label: 'কার্নেল' },
+    { key: 'qtyWithKernel', label: 'কার্নেল সহ পরিমাণ' },
     { key: 'amount', label: 'টাকা' },
     { key: 'tax', label: 'আয়কর' },
   ],
@@ -252,10 +272,15 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
   onSaveRate,
   onExportBackup,
   onImportBackup,
+  snapshots = [],
+  onRecoverAndCleanChallans,
+  onRecoverChallansFromSnapshot,
+  onRestoreFullSnapshot,
   onClearLocalData,
 }) => {
   const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
   const [confirmClearLocal, setConfirmClearLocal] = useState(false);
+  const [recoveryPasteText, setRecoveryPasteText] = useState('');
   const [sheetInput, setSheetInput] = useState(sheetsConfig.spreadsheetId || '');
   const [challanSheetInput, setChallanSheetInput] = useState(
     sheetsConfig.challanSpreadsheetId || ''
@@ -346,6 +371,22 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
     directUrl?: string;
     fileName?: string;
   } | null>(null);
+
+  // 1-Click GitHub Auto Push state (token kept strictly in memory only)
+  const [ghRepoInput, setGhRepoInput] = useState('khaddo-boraddo');
+  const [ghBranchInput, setGhBranchInput] = useState('main');
+  const [ghTokenInput, setGhTokenInput] = useState('');
+  const [ghShowToken, setGhShowToken] = useState(false);
+  const [ghScope, setGhScope] = useState<'full' | 'web'>('full');
+  const [ghAutoCreate, setGhAutoCreate] = useState(true);
+  const [ghPrivateRepo, setGhPrivateRepo] = useState(false);
+  const [ghCommitMessage, setGhCommitMessage] = useState(
+    'Update Khaddo Boraddo web & Android source code'
+  );
+  const [ghPushing, setGhPushing] = useState(false);
+  const [ghProgressText, setGhProgressText] = useState<string | null>(null);
+  const [ghPushResult, setGhPushResult] = useState<GitHubPushResult | null>(null);
+  const [ghPushError, setGhPushError] = useState<string | null>(null);
 
   const activeTemplate =
     db.templates[selectedTemplateId] ||
@@ -597,6 +638,95 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
     }
   };
 
+  const handlePushToGitHub = async () => {
+    const repo = ghRepoInput.trim();
+    const token = ghTokenInput.trim();
+    if (!repo) {
+      setGhPushError('GitHub রিপোজিটরির নাম বা লিংক দিন (যেমন: khaddo-boraddo অথবা username/khaddo-boraddo)।');
+      return;
+    }
+    if (!token) {
+      setGhPushError('GitHub Personal Access Token (PAT) দিন।');
+      return;
+    }
+
+    setGhPushing(true);
+    setGhPushError(null);
+    setGhPushResult(null);
+    setGhProgressText('সোর্স কোড প্রস্তুত করে GitHub-এ পাঠানো হচ্ছে...');
+    setFeedback(null);
+
+    try {
+      let result: GitHubPushResult | null = null;
+      let shouldFallbackToClient = false;
+
+      try {
+        const res = await fetch(`${apiBaseOrigin}/api/push-to-github`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            token,
+            repository: repo,
+            branch: ghBranchInput.trim() || 'main',
+            scope: ghScope,
+            commitMessage:
+              ghCommitMessage.trim() || 'Update Khaddo Boraddo web & Android source code',
+            autoCreateRepo: ghAutoCreate,
+            isPrivateRepo: ghPrivateRepo,
+            appName: apkAppName.trim() || DEFAULT_ANDROID_CONFIG.appName,
+            packageName: apkPackage.trim() || DEFAULT_ANDROID_CONFIG.packageName,
+            targetUrl: isAndroidWebViewOrigin() ? LIVE_PWA_APP_URL : window.location.origin,
+          }),
+        });
+        const ct = (res.headers.get('content-type') || '').toLowerCase();
+        if (res.status === 404 || ct.includes('text/html')) {
+          shouldFallbackToClient = true;
+        } else {
+          const data = (await res.json()) as Partial<GitHubPushResult> & { error?: string };
+          if (!res.ok || !data.ok) {
+            throw new Error(data.error || 'GitHub-এ কোড পুশ করা যায়নি।');
+          }
+          result = data as GitHubPushResult;
+        }
+      } catch (err) {
+        if (err instanceof TypeError) {
+          shouldFallbackToClient = true;
+        } else if (!shouldFallbackToClient) {
+          throw err;
+        }
+      }
+
+      if (shouldFallbackToClient || !result) {
+        result = await pushSourceToGitHubClientFallback({
+          token,
+          repository: repo,
+          branch: ghBranchInput.trim() || 'main',
+          scope: ghScope,
+          commitMessage:
+            ghCommitMessage.trim() || 'Update Khaddo Boraddo web & Android source code',
+          autoCreateRepo: ghAutoCreate,
+          isPrivateRepo: ghPrivateRepo,
+          appName: apkAppName.trim() || DEFAULT_ANDROID_CONFIG.appName,
+          packageName: apkPackage.trim() || DEFAULT_ANDROID_CONFIG.packageName,
+          onProgress: (phase, done, total) => {
+            setGhProgressText(total > 1 && done > 0 ? `${phase} (${done}/${total})` : phase);
+          },
+        });
+      }
+
+      setGhPushResult(result);
+      const okMsg = `সফল! ${toBnDigits(result.filesUploaded)}টি ফাইল GitHub-এ (${result.owner}/${result.repo}) পুশ হয়েছে।`;
+      setFeedback({ ok: true, text: okMsg });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'GitHub-এ কোড পুশ করা যায়নি।';
+      setGhPushError(msg);
+      setFeedback({ ok: false, text: msg });
+    } finally {
+      setGhPushing(false);
+      setGhProgressText(null);
+    }
+  };
+
   return (
     <div className="space-y-4 font-nikosh">
       {/* Settings Navigation Tabs (hidden when editing a single open Report/Register) */}
@@ -605,7 +735,7 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
           {(
             [
               { key: 'sheets', label: 'Google Sheet ও ব্যাকআপ', icon: FileSpreadsheet },
-              { key: 'templates', label: 'রিপোর্ট ও রেজিস্টার টেমপ্লেট (২৪টি)', icon: Sliders },
+              { key: 'templates', label: `রিপোর্ট ও রেজিস্টার টেমপ্লেট (${formatBnInt(REPORT_TEMPLATE_CATALOG.length)}টি)`, icon: Sliders },
               { key: 'officer', label: 'কর্মকর্তা ও স্বাক্ষর', icon: PenTool },
               { key: 'master', label: 'মাস্টার তালিকা ও দর', icon: Users },
               { key: 'android', label: 'সোর্স কোড ও APK', icon: FolderGit2 },
@@ -1084,6 +1214,154 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
               </div>
             </div>
           </div>
+
+          {/* Challan Recovery, Duplicate Cleanup & Snapshot History */}
+          {onRecoverAndCleanChallans && (
+            <div className="rounded-2xl border border-emerald-200 bg-white p-4 space-y-4">
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900 flex items-center gap-1.5">
+                    <ShieldCheck className="h-4 w-4 text-emerald-700" />
+                    <span>হারানো চালান উদ্ধার, ডুপ্লিকেট পরিষ্কার ও শিট পুনঃসাজানো</span>
+                  </h3>
+                  <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                    শিটের নিচে ডুপ্লিকেট হয়ে যুক্ত হওয়া সারি স্বয়ংক্রিয়ভাবে মুছে তারিখ ও ক্রম অনুযায়ী সাজানো হবে, এবং ডিও রেকর্ড বা Google Sheet Version History থেকে হারিয়ে যাওয়া চালান ফেরত আনা যাবে।
+                  </p>
+                </div>
+                {extractSpreadsheetId(sheetInput || sheetsConfig.spreadsheetId) && (
+                  <a
+                    href={`https://docs.google.com/spreadsheets/d/${encodeURIComponent(
+                      extractSpreadsheetId(sheetInput || sheetsConfig.spreadsheetId)
+                    )}/edit`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 px-3 py-2 text-xs font-bold text-emerald-900"
+                  >
+                    <ExternalLink className="h-3.5 w-3.5" />
+                    <span>Google Sheet খুলুন (Version History)</span>
+                  </a>
+                )}
+              </div>
+
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-800 space-y-1 leading-relaxed">
+                <div className="font-bold text-slate-900">
+                  Google Sheet থেকে ডিলিট হওয়া ৪টি চালান ফেরত পাওয়ার দ্রুত নিয়ম:
+                </div>
+                <ol className="list-decimal list-inside space-y-0.5">
+                  <li>
+                    উপরের বাটনে ক্লিক করে আপনার Google Sheet খুলুন এবং মেনু থেকে{' '}
+                    <span className="font-semibold">File → Version history → See version history</span>{' '}
+                    (বা <span className="font-mono">Ctrl+Alt+Shift+H</span>) চাপুন।
+                  </li>
+                  <li>
+                    ডান পাশের তালিকা থেকে মোছার আগের সময়ের ভার্সন সিলেক্ট করে ওই ৪টি চালানের সারি কপি (<span className="font-mono">Ctrl+C</span>) করে নিচের বক্সে পেস্ট করুন। (ডিও ইস্যুতে চালান নম্বর থাকলে পেস্ট ছাড়াই নিচের বাটনে উদ্ধার হবে।)
+                  </li>
+                </ol>
+              </div>
+
+              <div className="space-y-2">
+                <label className="block text-xs font-bold text-slate-800">
+                  Google Sheet / Version History থেকে কপি করা চালানের সারি এখানে পেস্ট করুন (ঐচ্ছিক):
+                </label>
+                <textarea
+                  rows={4}
+                  value={recoveryPasteText}
+                  onChange={(e) => setRecoveryPasteText(e.target.value)}
+                  placeholder="উদাহরণ: Google Sheet-এর Challan ট্যাব থেকে হারিয়ে যাওয়া ৪টি রো সিলেক্ট করে Ctrl+C দিয়ে এখানে Ctrl+V করুন..."
+                  className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-mono"
+                />
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    disabled={isSyncingSheets}
+                    onClick={() => {
+                      const res = onRecoverAndCleanChallans(recoveryPasteText);
+                      showRes(res);
+                      if (res.ok) setRecoveryPasteText('');
+                    }}
+                    className="min-h-[42px] inline-flex items-center gap-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 px-4 py-2 text-xs font-bold text-white cursor-pointer"
+                  >
+                    <Sparkles className="h-3.5 w-3.5" />
+                    <span>উদ্ধার করুন, ডুপ্লিকেট মুছুন ও শিট সাজান</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={
+                      isSyncingSheets ||
+                      (!hasGoogleToken && !mainGasUrlInput.trim() && !sheetsConfig.appsScriptUrl) ||
+                      (!sheetInput.trim() && !mainGasUrlInput.trim() && !sheetsConfig.appsScriptUrl)
+                    }
+                    onClick={async () => {
+                      const recRes = onRecoverAndCleanChallans(recoveryPasteText);
+                      if (!recRes.ok) {
+                        showRes(recRes);
+                        return;
+                      }
+                      setRecoveryPasteText('');
+                      const parsedMainId = extractSpreadsheetId(sheetInput);
+                      const trimmedGasUrl = mainGasUrlInput.trim();
+                      const pushRes = await onPushToSheet(trimmedGasUrl, parsedMainId);
+                      showRes(
+                        pushRes.ok
+                          ? { ok: true, message: `${recRes.message} Google Sheet-এও সাজানো তালিকা সেভ হয়েছে!` }
+                          : pushRes
+                      );
+                    }}
+                    className="min-h-[42px] inline-flex items-center gap-1.5 rounded-xl border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 disabled:opacity-40 px-4 py-2 text-xs font-bold text-emerald-950 cursor-pointer"
+                  >
+                    <CloudUpload className="h-3.5 w-3.5" />
+                    <span>উদ্ধার ও সাজিয়ে সরাসরি Google Sheet-এ সেভ (Push)</span>
+                  </button>
+                </div>
+              </div>
+
+              {snapshots.length > 0 && (
+                <div className="pt-2 border-t border-slate-200 space-y-2">
+                  <div className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
+                    <History className="h-3.5 w-3.5 text-[#E2136E]" />
+                    <span>অটো-স্ন্যাপশট ইতিহাস (প্রতি সিঙ্ক/সেভ/ডিলিটের আগে স্বয়ংক্রিয় ব্যাকআপ):</span>
+                  </div>
+                  <div className="space-y-1.5 max-h-52 overflow-y-auto pr-1">
+                    {snapshots.map((snap) => (
+                      <div
+                        key={snap.id}
+                        className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200 bg-slate-50/80 px-3 py-2 text-xs"
+                      >
+                        <div>
+                          <div className="font-bold text-slate-900">{snap.reason}</div>
+                          <div className="text-[11px] text-slate-600">
+                            {new Date(snap.createdAt).toLocaleString('bn-BD')} · চালান:{' '}
+                            {formatBnInt(snap.challanCount)}টি · ডিও: {formatBnInt(snap.doCount)}টি
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {onRecoverChallansFromSnapshot && (
+                            <button
+                              type="button"
+                              onClick={() => showRes(onRecoverChallansFromSnapshot(snap.id))}
+                              className="rounded-lg border border-emerald-300 bg-white hover:bg-emerald-50 px-2.5 py-1 text-[11px] font-bold text-emerald-900 cursor-pointer"
+                            >
+                              হারানো চালান ফেরত আনুন
+                            </button>
+                          )}
+                          {onRestoreFullSnapshot && (
+                            <button
+                              type="button"
+                              onClick={() => showRes(onRestoreFullSnapshot(snap.id))}
+                              className="rounded-lg border border-slate-300 bg-white hover:bg-slate-100 px-2.5 py-1 text-[11px] font-bold text-slate-800 cursor-pointer"
+                            >
+                              সম্পূর্ণ রিস্টোর
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Local JSON Backup & Restore */}
           <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-3">
@@ -3005,9 +3283,238 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
             </div>
           )}
 
+          <div className="rounded-2xl border-2 border-indigo-200 bg-indigo-50/40 p-4 space-y-3.5">
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div>
+                <h4 className="text-sm font-extrabold text-indigo-950 flex items-center gap-1.5">
+                  <FolderGit2 className="h-4 w-4 text-indigo-700" />
+                  <span>১-ক্লিকে সরাসরি GitHub-এ কোড পুশ করুন (ZIP / Unzip ছাড়াই)</span>
+                </h4>
+                <p className="text-[11px] text-slate-700 mt-0.5">
+                  ফোন বা কম্পিউটার থেকে Unzip না করেই সরাসরি GitHub রিপোজিটরিতে সম্পূর্ণ সোর্স কোড ও{' '}
+                  <code className="font-mono font-bold">.github/workflows/build-apk.yml</code> আপলোড করুন।
+                </p>
+              </div>
+              <a
+                href="https://github.com/settings/tokens/new?scopes=repo,workflow&description=Khaddo+Boraddo+App+Sync"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="min-h-[36px] inline-flex items-center gap-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 px-3 py-1.5 text-[11px] font-bold text-white shrink-0"
+              >
+                <ExternalLink className="h-3.5 w-3.5 text-amber-300" />
+                <span>১ ক্লিকে GitHub Token তৈরি করুন</span>
+              </a>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block font-bold text-slate-800 mb-1">
+                  GitHub রিপোজিটরি নাম বা লিংক
+                </label>
+                <input
+                  type="text"
+                  value={ghRepoInput}
+                  onChange={(e) => setGhRepoInput(e.target.value)}
+                  placeholder="khaddo-boraddo অথবা username/khaddo-boraddo"
+                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-mono text-xs"
+                />
+              </div>
+              <div>
+                <label className="block font-bold text-slate-800 mb-1">Branch</label>
+                <input
+                  type="text"
+                  value={ghBranchInput}
+                  onChange={(e) => setGhBranchInput(e.target.value)}
+                  placeholder="main"
+                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-mono text-xs"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block font-bold text-slate-800 mb-1">
+                  GitHub Personal Access Token (PAT)
+                </label>
+                <div className="relative">
+                  <input
+                    type={ghShowToken ? 'text' : 'password'}
+                    value={ghTokenInput}
+                    onChange={(e) => setGhTokenInput(e.target.value)}
+                    placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
+                    autoComplete="off"
+                    className="w-full rounded-lg border border-slate-300 bg-white pl-3 pr-10 py-2 font-mono text-xs"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setGhShowToken((v) => !v)}
+                    className="absolute inset-y-0 right-0 px-2.5 text-slate-500 hover:text-slate-800 cursor-pointer"
+                    title={ghShowToken ? 'টোকেন লুকান' : 'টোকেন দেখুন'}
+                  >
+                    {ghShowToken ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </button>
+                </div>
+                <p className="text-[10px] text-slate-500 mt-1">
+                  টোকেনটি কোথাও সেভ করা হয় না — শুধু এই মুহূর্তে GitHub-এ ফাইল পুশ করতে ব্যবহৃত হয়।
+                </p>
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-800 mb-1">কমিট বার্তা (Commit Message)</label>
+                <input
+                  type="text"
+                  value={ghCommitMessage}
+                  onChange={(e) => setGhCommitMessage(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs"
+                />
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-4 text-[11px] font-bold text-slate-800">
+              <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                <input
+                  type="radio"
+                  name="ghScope"
+                  checked={ghScope === 'full'}
+                  onChange={() => setGhScope('full')}
+                  className="accent-indigo-700"
+                />
+                <span>সম্পূর্ণ কোড + Android APK ওয়ার্কফ্লো (সুপারিশকৃত)</span>
+              </label>
+              <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                <input
+                  type="radio"
+                  name="ghScope"
+                  checked={ghScope === 'web'}
+                  onChange={() => setGhScope('web')}
+                  className="accent-indigo-700"
+                />
+                <span>শুধু ওয়েব সোর্স কোড</span>
+              </label>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-4 text-[11px] font-bold text-slate-700">
+              <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={ghAutoCreate}
+                  onChange={(e) => setGhAutoCreate(e.target.checked)}
+                  className="rounded accent-indigo-700"
+                />
+                <span>রিপোজিটরি না থাকলে স্বয়ংক্রিয়ভাবে তৈরি করো</span>
+              </label>
+              {ghAutoCreate && (
+                <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={ghPrivateRepo}
+                    onChange={(e) => setGhPrivateRepo(e.target.checked)}
+                    className="rounded accent-indigo-700"
+                  />
+                  <span>Private রিপোজিটরি (Public রাখলে GitHub Actions APK বিল্ড ফ্রি)</span>
+                </label>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2.5">
+              <button
+                type="button"
+                disabled={ghPushing}
+                onClick={() => void handlePushToGitHub()}
+                className="min-h-[44px] inline-flex items-center gap-2 rounded-xl bg-indigo-700 hover:bg-indigo-800 disabled:opacity-50 px-5 py-2.5 text-xs font-extrabold text-white cursor-pointer shadow-sm"
+              >
+                {ghPushing ? (
+                  <RefreshCw className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Upload className="h-4 w-4" />
+                )}
+                <span>{ghPushing ? 'GitHub-এ পুশ হচ্ছে...' : 'GitHub-এ কোড পুশ করুন'}</span>
+              </button>
+
+              {ghProgressText && (
+                <span className="text-[11px] font-bold text-indigo-800">{ghProgressText}</span>
+              )}
+            </div>
+
+            {ghPushError && (
+              <div className="rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs font-bold text-rose-900">
+                {ghPushError}
+              </div>
+            )}
+
+            {ghPushResult && (
+              <div className="rounded-xl border border-emerald-300 bg-emerald-50 p-3.5 text-xs text-emerald-950 space-y-2">
+                <div className="font-extrabold flex items-center gap-1.5">
+                  <CheckCircle2 className="h-4 w-4 text-emerald-700 shrink-0" />
+                  <span>
+                    {ghPushResult.createdRepo
+                      ? `নতুন রিপোজিটরি (${ghPushResult.owner}/${ghPushResult.repo}) তৈরি করে `
+                      : ''}
+                    সফলভাবে {toBnDigits(ghPushResult.filesUploaded)}টি ফাইল GitHub-এ পুশ করা হয়েছে!
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <a
+                    href={ghPushResult.repoUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-white border border-emerald-300 px-3 py-1.5 text-[11px] font-extrabold text-emerald-900 hover:bg-emerald-100"
+                  >
+                    <ExternalLink className="h-3.5 w-3.5" />
+                    <span>GitHub রিপোজিটরি দেখুন</span>
+                  </a>
+                  <a
+                    href={ghPushResult.actionsUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-[#E2136E] px-3 py-1.5 text-[11px] font-extrabold text-white hover:bg-[#B80D58]"
+                  >
+                    <ExternalLink className="h-3.5 w-3.5" />
+                    <span>Actions ট্যাবে APK বিল্ড দেখুন</span>
+                  </a>
+                  <a
+                    href={ghPushResult.commitUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-white border border-slate-300 px-3 py-1.5 text-[11px] font-bold text-slate-700 hover:bg-slate-50"
+                  >
+                    <span className="font-mono">{ghPushResult.commitSha.slice(0, 7)}</span>
+                    <span>কমিট দেখুন</span>
+                  </a>
+                </div>
+              </div>
+            )}
+
+            <div className="rounded-xl border border-indigo-200/80 bg-white/80 p-3 text-[11px] text-slate-700 space-y-1">
+              <div className="font-extrabold text-indigo-950">কীভাবে ব্যবহার করবেন (৪টি সহজ ধাপ):</div>
+              <ol className="list-decimal list-inside space-y-0.5 leading-relaxed">
+                <li>
+                  উপরের <strong>«১ ক্লিকে GitHub Token তৈরি করুন»</strong> বাটনে ট্যাপ করুন → GitHub-এ{' '}
+                  <code className="font-mono font-bold">repo</code> ও{' '}
+                  <code className="font-mono font-bold">workflow</code> আগে থেকেই টিক দেওয়া থাকবে → নিচে{' '}
+                  <strong>Generate token</strong> চেপে টোকেন কপি করুন।
+                </li>
+                <li>
+                  টোকেনটি উপরের <strong>PAT</strong> ঘরে পেস্ট করুন এবং রিপোজিটরির নাম দিন (যেমন:{' '}
+                  <code className="font-mono font-bold">khaddo-boraddo</code> বা আপনার আগের{' '}
+                  <code className="font-mono font-bold">username/repo</code>)।
+                </li>
+                <li>
+                  <strong>«GitHub-এ কোড পুশ করুন»</strong> চাপুন — কোনো ZIP/Unzip ছাড়াই সব কোড, খাদ্যশস্য আইকন ও{' '}
+                  <code className="font-mono font-bold">.github</code> ফোল্ডার উঠে যাবে (আগে ভুল করে আপলোড করা{' '}
+                  <code className="font-mono font-bold">.zip</code> থাকলে সেটিও পরিষ্কার হবে)।
+                </li>
+                <li>
+                  এরপর <strong>«Actions ট্যাবে APK বিল্ড দেখুন»</strong> খুললে ২–৩ মিনিটেই নতুন{' '}
+                  <code className="font-mono font-bold">app-debug.apk</code> ডাউনলোড করতে পারবেন।
+                </li>
+              </ol>
+            </div>
+          </div>
+
           <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-3.5 text-slate-800 space-y-1.5">
             <div className="font-extrabold text-amber-950">
-              GitHub-এ সরাসরি কোড এডিট করার সঠিক নিয়ম:
+              অথবা ম্যানুয়ালি ZIP থেকে GitHub-এ কোড আপলোড করতে চাইলে:
             </div>
             <ol className="list-decimal list-inside space-y-1 text-[11px] leading-relaxed text-slate-700">
               <li>

@@ -1,4 +1,5 @@
 import {
+  CATEGORY_BY_NAME,
   DEFAULT_OFFICER_PROFILE,
   createDefaultTemplatesMap,
   type AllocationCategory,
@@ -12,13 +13,14 @@ import {
   type DealerSuballocation,
   type FireServiceEntry,
   type FoodDealer,
+  type GrainType,
   type MinistryAllocation,
   type OMSDealer,
   type ProjectEntry,
   type UNOSuballocation,
 } from '../types/allocation';
 import type { DriveSpreadsheetFile } from '../types/grain';
-import { bnToEnDigits, fiscalYearLabel, isChallanOnOrBeforeDo, isSamePartyName, memosLikelyMatch, namesFuzzyMatch, namesLikelyMatch, normMemoNo, parseMonthYear, parseNum, round2, round3, toBnDigits, toIsoDateStr, uid } from './bnUtils';
+import { bnToEnDigits, fiscalYearLabel, isChallanOnOrBeforeDo, isSamePartyName, memosLikelyMatch, namesFuzzyMatch, namesLikelyMatch, normChallanNo, normMemoNo, normPersonName, parseMonthYear, parseNum, round2, round3, toBnDigits, toIsoDateStr, uid } from './bnUtils';
 import { callAndroidNativeHttp, callGasAction } from './gasBridge';
 import {
   GoogleAuthExpiredError,
@@ -814,7 +816,7 @@ function buildAllocationDbFromRawTables(
         memoNo,
         memoDate: parseDateStr(pickField(o, ['memodate', 'date', 'তারিখ', 'স্মারকতারিখ', 'createdat']), minMdy),
         allocationQty: pickNum(o, ['allocationqty', 'qty', 'quantity', 'পরিমাণ', 'বরাদ্দ']),
-        grain: (pickField(o, ['grain', 'শস্য', 'পণ্য']) || 'চাল') as 'চাল' | 'গম' | 'আটা',
+        grain: normalizeGrainType(pickField(o, ['grain', 'শস্য', 'পণ্য']), 'চাল'),
         phase: pickNum(o, ['phase', 'পর্যায়']) || undefined,
         comment,
         createdAt: pickField(o, ['createdat']) || new Date().toISOString(),
@@ -1230,7 +1232,38 @@ export function reconcileChallansAndDOs(db: AllocationDatabase): AllocationDatab
     return s ? s.slice(0, 7) : '';
   };
 
+  const minGrainByKey = new Map<string, GrainType>();
+  for (const m of db.ministryAllocations) {
+    minGrainByKey.set(`${m.category}::${m.memoNo.trim()}`, m.grain);
+    const nm = normMemoNo(m.memoNo);
+    if (nm) minGrainByKey.set(`${m.category}::${nm}`, m.grain);
+  }
+  const dcMinMemoByKey = new Map<string, string>();
+  for (const dc of db.dcAllocations) {
+    dcMinMemoByKey.set(`${dc.category}::${dc.dcMemo.trim()}`, dc.ministryMemo);
+    const nm = normMemoNo(dc.dcMemo);
+    if (nm) dcMinMemoByKey.set(`${dc.category}::${nm}`, dc.ministryMemo);
+  }
+  const isKernelMemo = (category: AllocationCategory, sourceMemo?: string): boolean => {
+    const raw = (sourceMemo || '').trim();
+    if (!raw) return false;
+    const catMeta = CATEGORY_BY_NAME[category];
+    const resolvedMin = catMeta?.requiresDC
+      ? dcMinMemoByKey.get(`${category}::${raw}`) ||
+        dcMinMemoByKey.get(`${category}::${normMemoNo(raw)}`) ||
+        raw
+      : raw;
+    const grain =
+      minGrainByKey.get(`${category}::${resolvedMin}`) ||
+      minGrainByKey.get(`${category}::${normMemoNo(resolvedMin)}`);
+    return grain === 'কার্নেল';
+  };
+
   const enrichedSubs: DealerSuballocation[] = db.dealerSuballocations.map((s) => {
+    if (isKernelMemo(s.category, s.sourceMemo)) {
+      if (s.totalAmount === 0 && s.taxAmount === 0) return s;
+      return { ...s, totalAmount: 0, taxAmount: 0 };
+    }
     const unitPrice = getEffectiveUnitPrice(s.category);
     const taxRate = getEffectiveTaxRate(s.category);
     const totalAmount = s.totalAmount > 0 ? s.totalAmount : round2(s.allocationQty * unitPrice);
@@ -1244,28 +1277,7 @@ export function reconcileChallansAndDOs(db: AllocationDatabase): AllocationDatab
     if (s.id) subById.set(s.id.trim(), s);
   }
 
-  // Strictly deduplicate challans: once a challan number (per type) exists, it cannot be used twice
-  const dedupMap = new Map<string, ChallanRecord>();
-  for (const c of db.challans) {
-    const normChallan = normMemoNo(c.challanNo);
-    const dedupKey = normChallan ? `${normChallan}::${c.challanType}` : `id::${c.id}`;
-    const existing = dedupMap.get(dedupKey);
-    if (!existing) {
-      dedupMap.set(dedupKey, c);
-    } else {
-      const existingIso = toIsoDateStr(existing.challanDate) || '9999-99-99';
-      const newIso = toIsoDateStr(c.challanDate) || '9999-99-99';
-      const pickNew =
-        newIso < existingIso ||
-        (newIso === existingIso &&
-          ((c.recordedAmount > 0 && existing.recordedAmount <= 0) ||
-            (Boolean(c.allocationQty) && !existing.allocationQty) ||
-            (Boolean(c.dealerAllocationId) && !existing.dealerAllocationId) ||
-            c.depositedAmount > existing.depositedAmount));
-      if (pickNew) dedupMap.set(dedupKey, c);
-    }
-  }
-  const uniqueChallans = Array.from(dedupMap.values());
+  const uniqueChallans = deduplicateChallanRecords(db.challans);
 
   // Resolve consistent same-category & same-dealer suballocation metadata (never cross-category / cross-dealer)
   const preNormalizedChallans: ChallanRecord[] = uniqueChallans.map((c) => {
@@ -1297,6 +1309,13 @@ export function reconcileChallansAndDOs(db: AllocationDatabase): AllocationDatab
     return c;
   });
 
+  const isKernelDo = (d: DOIssue): boolean => {
+    if (isKernelMemo(d.category, d.ministryMemo)) return true;
+    const linkedSub = d.dealerAllocationId ? subById.get(d.dealerAllocationId.trim()) : undefined;
+    if (linkedSub && isKernelMemo(linkedSub.category, linkedSub.sourceMemo)) return true;
+    return false;
+  };
+
   // Sort DOs chronologically (earliest issueDate, then numeric doNo, then createdAt)
   const sortedDos = [...db.doIssues].sort((a, b) => {
     const da = toIsoDateStr(a.issueDate) || '9999-99-99';
@@ -1322,13 +1341,14 @@ export function reconcileChallansAndDOs(db: AllocationDatabase): AllocationDatab
   // 4) Earliest challan -> earliest DO; once used, never reused
   for (const type of ['মূল চালান', 'আয়কর চালান'] as const) {
     for (const d of sortedDos) {
+      if (isKernelDo(d)) continue;
       const dIso = toIsoDateStr(d.issueDate);
       const targetDoChallanNo = type === 'মূল চালান' ? d.challanNo : d.taxChallanNo;
 
       const candidates = preNormalizedChallans.filter((c) => {
         if (c.challanType !== type) return false;
         if (usedChallanIds.has(c.id)) return false;
-        const chKey = normMemoNo(c.challanNo);
+        const chKey = normChallanNo(c.challanNo);
         if (chKey && usedChallanNoType.has(`${chKey}::${type}`)) return false;
 
         // Rule: Same category strictly
@@ -1349,7 +1369,7 @@ export function reconcileChallansAndDOs(db: AllocationDatabase): AllocationDatab
             (d.dealerAllocationId &&
               c.dealerAllocationId &&
               normMemoNo(d.dealerAllocationId) === normMemoNo(c.dealerAllocationId)) ||
-            (targetDoChallanNo && chKey && chKey === normMemoNo(targetDoChallanNo));
+            (targetDoChallanNo && chKey && chKey === normChallanNo(targetDoChallanNo));
           if (!explicit) return false;
         }
 
@@ -1368,13 +1388,13 @@ export function reconcileChallansAndDOs(db: AllocationDatabase): AllocationDatab
         // Same-day tie-breakers: explicit link, then quantity proximity, then challanNo numeric
         const aExplicit =
           (a.doNo && d.doNo && normMemoNo(a.doNo) === normMemoNo(d.doNo)) ||
-          (targetDoChallanNo && a.challanNo && normMemoNo(a.challanNo) === normMemoNo(targetDoChallanNo)) ||
+          (targetDoChallanNo && a.challanNo && normChallanNo(a.challanNo) === normChallanNo(targetDoChallanNo)) ||
           (d.dealerAllocationId && a.dealerAllocationId && normMemoNo(a.dealerAllocationId) === normMemoNo(d.dealerAllocationId))
             ? 0
             : 1;
         const bExplicit =
           (b.doNo && d.doNo && normMemoNo(b.doNo) === normMemoNo(d.doNo)) ||
-          (targetDoChallanNo && b.challanNo && normMemoNo(b.challanNo) === normMemoNo(targetDoChallanNo)) ||
+          (targetDoChallanNo && b.challanNo && normChallanNo(b.challanNo) === normChallanNo(targetDoChallanNo)) ||
           (d.dealerAllocationId && b.dealerAllocationId && normMemoNo(b.dealerAllocationId) === normMemoNo(d.dealerAllocationId))
             ? 0
             : 1;
@@ -1397,7 +1417,7 @@ export function reconcileChallansAndDOs(db: AllocationDatabase): AllocationDatab
 
       const best = candidates[0];
       usedChallanIds.add(best.id);
-      const bestKey = normMemoNo(best.challanNo);
+      const bestKey = normChallanNo(best.challanNo);
       if (bestKey) usedChallanNoType.add(`${bestKey}::${type}`);
       matchedDoByChallanId.set(best.id, d);
       if (type === 'মূল চালান') matchedMainByDoId.set(d.id, best);
@@ -1410,12 +1430,14 @@ export function reconcileChallansAndDOs(db: AllocationDatabase): AllocationDatab
     main: new Set(
       preNormalizedChallans
         .filter((c) => c.challanType === 'মূল চালান' && c.challanNo)
-        .map((c) => normMemoNo(c.challanNo))
+        .map((c) => normChallanNo(c.challanNo))
+        .filter(Boolean)
     ),
     tax: new Set(
       preNormalizedChallans
         .filter((c) => c.challanType === 'আয়কর চালান' && c.challanNo)
-        .map((c) => normMemoNo(c.challanNo))
+        .map((c) => normChallanNo(c.challanNo))
+        .filter(Boolean)
     ),
   };
 
@@ -1456,7 +1478,7 @@ export function reconcileChallansAndDOs(db: AllocationDatabase): AllocationDatab
     }
 
     let rec = 0;
-    if (validLinkedSub) {
+    if (validLinkedSub && !isKernelMemo(validLinkedSub.category, validLinkedSub.sourceMemo)) {
       rec =
         c.challanType === 'আয়কর চালান'
           ? validLinkedSub.taxAmount ||
@@ -1467,6 +1489,7 @@ export function reconcileChallansAndDOs(db: AllocationDatabase): AllocationDatab
       const matchedSub = enrichedSubs.find(
         (s) =>
           s.category === matchingDo.category &&
+          !isKernelMemo(s.category, s.sourceMemo) &&
           normMemoNo(s.unoMemo) === normMemoNo(matchingDo.unoMemo) &&
           isSamePartyName(s.dealerName, matchingDo.recipientName)
       );
@@ -1490,7 +1513,10 @@ export function reconcileChallansAndDOs(db: AllocationDatabase): AllocationDatab
       const refMonth = monthKey(refDate);
       const sameCatDealerSubs = c.dealerName
         ? enrichedSubs.filter(
-            (s) => s.category === c.category && isSamePartyName(s.dealerName, c.dealerName)
+            (s) =>
+              s.category === c.category &&
+              !isKernelMemo(s.category, s.sourceMemo) &&
+              isSamePartyName(s.dealerName, c.dealerName)
           )
         : [];
       const monthSub =
@@ -1541,6 +1567,21 @@ export function reconcileChallansAndDOs(db: AllocationDatabase): AllocationDatab
   const enrichedDoMap = new Map<string, DOIssue>();
 
   for (const d of sortedDos) {
+    if (isKernelDo(d)) {
+      enrichedDoMap.set(d.id, {
+        ...d,
+        challanNo: undefined,
+        challanDate: undefined,
+        challanAmount: undefined,
+        taxChallanNo: undefined,
+        taxChallanDate: undefined,
+        taxChallanAmount: undefined,
+        requiredAmount: 0,
+        requiredTaxAmount: 0,
+      });
+      continue;
+    }
+
     const mainMatch = matchedMainByDoId.get(d.id);
     const taxMatch = matchedTaxByDoId.get(d.id);
 
@@ -1548,7 +1589,7 @@ export function reconcileChallansAndDOs(db: AllocationDatabase): AllocationDatab
     let nextMainDate = mainMatch?.challanDate;
     let nextMainAmt = mainMatch?.depositedAmount;
     if (!mainMatch && d.challanNo) {
-      const mKey = normMemoNo(d.challanNo);
+      const mKey = normChallanNo(d.challanNo);
       const existsInChallans = mKey && allChallanNoSetByType.main.has(mKey);
       const dateOk = isChallanOnOrBeforeDo(d.challanDate, d.issueDate, false);
       if (!existsInChallans && dateOk && (!mKey || !usedInlineMainNos.has(`${mKey}::মূল চালান`))) {
@@ -1563,7 +1604,7 @@ export function reconcileChallansAndDOs(db: AllocationDatabase): AllocationDatab
     let nextTaxDate = taxMatch?.challanDate;
     let nextTaxAmt = taxMatch?.depositedAmount;
     if (!taxMatch && d.taxChallanNo) {
-      const tKey = normMemoNo(d.taxChallanNo);
+      const tKey = normChallanNo(d.taxChallanNo);
       const existsInChallans = tKey && allChallanNoSetByType.tax.has(tKey);
       const dateOk = isChallanOnOrBeforeDo(d.taxChallanDate, d.issueDate, false);
       if (!existsInChallans && dateOk && (!tKey || !usedInlineMainNos.has(`${tKey}::আয়কর চালান`))) {
@@ -1803,10 +1844,394 @@ export async function fetchAllocationFromAppsScript(
   };
 }
 
-function parseChallanRowsFromTable(rows: unknown[][], workbookPreferMdy = false): ChallanRecord[] {
+function stableChallanHash(seed: string): string {
+  let h = 2166136261;
+  for (let i = 0; i < seed.length; i++) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(36);
+}
+
+function makeDeterministicChallanId(
+  prefix: string,
+  challanType: ChallanRecord['challanType'],
+  challanNo: string,
+  challanDate: string,
+  dealerName: string,
+  category: string,
+  rowIndex: number,
+  seenIds: Set<string>
+): string {
+  const nNo = normChallanNo(challanNo);
+  const seed = nNo
+    ? `${challanType}|${nNo}`
+    : `${challanType}|${toIsoDateStr(challanDate)}|${normPersonName(dealerName)}|${category}|${rowIndex}`;
+  let candidate = `${prefix}-${stableChallanHash(seed)}`;
+  if (!seenIds.has(candidate)) {
+    seenIds.add(candidate);
+    return candidate;
+  }
+  let suffix = 1;
+  while (seenIds.has(`${candidate}-${suffix}`)) suffix++;
+  candidate = `${candidate}-${suffix}`;
+  seenIds.add(candidate);
+  return candidate;
+}
+
+export function deduplicateChallanRecords(challans: ChallanRecord[]): ChallanRecord[] {
+  const dedupMap = new Map<string, ChallanRecord>();
+  const exactRowSeen = new Map<string, string>();
+
+  const shouldPreferNew = (existing: ChallanRecord, candidate: ChallanRecord): boolean => {
+    const existingIso = toIsoDateStr(existing.challanDate) || '9999-99-99';
+    const newIso = toIsoDateStr(candidate.challanDate) || '9999-99-99';
+    if (newIso !== existingIso) return newIso < existingIso;
+    if ((candidate.recordedAmount > 0) !== (existing.recordedAmount > 0)) {
+      return candidate.recordedAmount > 0;
+    }
+    if (Boolean(candidate.allocationQty) !== Boolean(existing.allocationQty)) {
+      return Boolean(candidate.allocationQty);
+    }
+    if (Boolean(candidate.dealerAllocationId) !== Boolean(existing.dealerAllocationId)) {
+      return Boolean(candidate.dealerAllocationId);
+    }
+    if (candidate.depositedAmount !== existing.depositedAmount) {
+      return candidate.depositedAmount > existing.depositedAmount;
+    }
+    const candNo = String(candidate.challanNo || '').trim();
+    const exNo = String(existing.challanNo || '').trim();
+    if (candNo.length !== exNo.length) {
+      return candNo.length > exNo.length;
+    }
+    return false;
+  };
+
+  const mergeMeta = (winner: ChallanRecord, loser: ChallanRecord): ChallanRecord => {
+    const winnerNo = String(winner.challanNo || '').trim();
+    const loserNo = String(loser.challanNo || '').trim();
+    const preservedNo =
+      loserNo.length > winnerNo.length && normChallanNo(loserNo) === normChallanNo(winnerNo)
+        ? loserNo
+        : winner.challanNo;
+    return {
+      ...winner,
+      challanNo: preservedNo,
+      challanDate: winner.challanDate || loser.challanDate,
+      dealerName: winner.dealerName && winner.dealerName !== '—' ? winner.dealerName : loser.dealerName,
+      bankName: winner.bankName || loser.bankName,
+      doNo: winner.doNo || loser.doNo,
+      doDate: winner.doDate || loser.doDate,
+      dealerAllocationId: winner.dealerAllocationId || loser.dealerAllocationId,
+      allocationQty: winner.allocationQty || loser.allocationQty,
+      recordedAmount: winner.recordedAmount > 0 ? winner.recordedAmount : loser.recordedAmount,
+      depositedAmount: winner.depositedAmount > 0 ? winner.depositedAmount : loser.depositedAmount,
+      note: winner.note || loser.note,
+    };
+  };
+
+  for (const c of challans) {
+    const nNo = normChallanNo(c.challanNo);
+    let dedupKey = nNo ? `${nNo}::${c.challanType}` : `id::${c.id}`;
+
+    if (nNo && c.depositedAmount > 0) {
+      const exactKey = `${nNo}::${toIsoDateStr(c.challanDate)}::${round2(c.depositedAmount)}::${normPersonName(c.dealerName)}::${c.category}`;
+      const priorKey = exactRowSeen.get(exactKey);
+      if (priorKey && priorKey !== dedupKey) {
+        dedupKey = priorKey;
+      } else {
+        exactRowSeen.set(exactKey, dedupKey);
+      }
+    }
+
+    const existing = dedupMap.get(dedupKey);
+    if (!existing) {
+      dedupMap.set(dedupKey, c);
+    } else if (shouldPreferNew(existing, c)) {
+      dedupMap.set(dedupKey, mergeMeta(c, existing));
+    } else {
+      dedupMap.set(dedupKey, mergeMeta(existing, c));
+    }
+  }
+
+  return Array.from(dedupMap.values());
+}
+
+export function sortChallansCleanly(challans: ChallanRecord[]): ChallanRecord[] {
+  return [...challans].sort((a, b) => {
+    const da = toIsoDateStr(a.challanDate) || '9999-99-99';
+    const dbDate = toIsoDateStr(b.challanDate) || '9999-99-99';
+    if (da !== dbDate) return da.localeCompare(dbDate);
+    if (a.category !== b.category) return a.category.localeCompare(b.category, 'bn');
+    const na = bnToEnDigits(a.challanNo || '');
+    const nb = bnToEnDigits(b.challanNo || '');
+    const noCmp = na.localeCompare(nb, undefined, { numeric: true });
+    if (noCmp !== 0) return noCmp;
+    if (a.challanType !== b.challanType) {
+      return a.challanType === 'মূল চালান' ? -1 : 1;
+    }
+    return (a.dealerName || '').localeCompare(b.dealerName || '', 'bn');
+  });
+}
+
+export function recoverMissingChallansFromDOs(db: AllocationDatabase): {
+  db: AllocationDatabase;
+  recoveredCount: number;
+  duplicatesRemoved: number;
+} {
+  const beforeLen = db.challans.length;
+  const deduped = deduplicateChallanRecords(db.challans);
+  const duplicatesRemoved = Math.max(0, beforeLen - deduped.length);
+
+  const existingKeys = new Set<string>();
+  for (const c of deduped) {
+    const nNo = normChallanNo(c.challanNo);
+    if (nNo) existingKeys.add(`${nNo}::${c.challanType}`);
+  }
+
+  const rateMap = new Map(db.rates.map((r) => [r.category, r]));
+  const recovered: ChallanRecord[] = [];
+  const seenIds = new Set(deduped.map((c) => c.id));
+
+  db.doIssues.forEach((d, idx) => {
+    const rateRec = rateMap.get(d.category);
+    const unitPrice = rateRec?.unitPrice || (d.category === 'খাদ্য বান্ধব' ? 13000 : 0);
+    const taxRate = rateRec?.taxRate || (d.category === 'খাদ্য বান্ধব' ? 200 : 0);
+
+    const mainNo = String(d.challanNo || '').trim();
+    const mainNorm = normChallanNo(mainNo);
+    if (mainNorm && !existingKeys.has(`${mainNorm}::মূল চালান`)) {
+      existingKeys.add(`${mainNorm}::মূল চালান`);
+      const cDate = d.challanDate || d.issueDate || '';
+      const recAmt =
+        d.requiredAmount && d.requiredAmount > 0
+          ? d.requiredAmount
+          : round2((d.allocationQty || 0) * unitPrice);
+      const depAmt = d.challanAmount && d.challanAmount > 0 ? d.challanAmount : recAmt;
+      recovered.push({
+        id: makeDeterministicChallanId(
+          'ch-rec-m',
+          'মূল চালান',
+          mainNo,
+          cDate,
+          d.recipientName,
+          d.category,
+          idx,
+          seenIds
+        ),
+        challanNo: mainNo,
+        challanDate: cDate,
+        category: d.category,
+        dealerName: d.recipientName,
+        dealerAllocationId: d.dealerAllocationId,
+        challanType: 'মূল চালান',
+        bankName: '',
+        doNo: d.doNo,
+        doDate: d.issueDate,
+        allocationQty: d.allocationQty > 0 ? round3(d.allocationQty) : undefined,
+        recordedAmount: round2(recAmt),
+        depositedAmount: round2(depAmt),
+        note: 'ডিও রেকর্ড থেকে পুনরুদ্ধার',
+        createdAt: d.createdAt || (cDate ? `${cDate}T00:00:00.000Z` : '2025-01-01T00:00:00.000Z'),
+      });
+    }
+
+    const taxNo = String(d.taxChallanNo || '').trim();
+    const taxNorm = normChallanNo(taxNo);
+    if (taxNorm && !existingKeys.has(`${taxNorm}::আয়কর চালান`)) {
+      existingKeys.add(`${taxNorm}::আয়কর চালান`);
+      const tDate = d.taxChallanDate || d.challanDate || d.issueDate || '';
+      const recTax =
+        d.requiredTaxAmount && d.requiredTaxAmount > 0
+          ? d.requiredTaxAmount
+          : round2((d.allocationQty || 0) * taxRate);
+      const depTax = d.taxChallanAmount && d.taxChallanAmount > 0 ? d.taxChallanAmount : recTax;
+      recovered.push({
+        id: makeDeterministicChallanId(
+          'ch-rec-t',
+          'আয়কর চালান',
+          taxNo,
+          tDate,
+          d.recipientName,
+          d.category,
+          idx,
+          seenIds
+        ),
+        challanNo: taxNo,
+        challanDate: tDate,
+        category: d.category,
+        dealerName: d.recipientName,
+        dealerAllocationId: d.dealerAllocationId,
+        challanType: 'আয়কর চালান',
+        bankName: '',
+        doNo: d.doNo,
+        doDate: d.issueDate,
+        allocationQty: d.allocationQty > 0 ? round3(d.allocationQty) : undefined,
+        recordedAmount: round2(recTax),
+        depositedAmount: round2(depTax),
+        note: 'ডিও রেকর্ড থেকে পুনরুদ্ধার',
+        createdAt: d.createdAt || (tDate ? `${tDate}T00:00:00.000Z` : '2025-01-01T00:00:00.000Z'),
+      });
+    }
+  });
+
+  const merged = sortChallansCleanly(deduplicateChallanRecords([...deduped, ...recovered]));
+  const nextDb = reconcileChallansAndDOs({
+    ...db,
+    challans: merged,
+  });
+
+  return {
+    db: nextDb,
+    recoveredCount: recovered.length,
+    duplicatesRemoved,
+  };
+}
+
+function splitDelimitedLine(line: string, preferTab: boolean): string[] {
+  if (preferTab) {
+    return line.split('\t').map((c) => c.trim());
+  }
+  const out: string[] = [];
+  let cur = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') {
+      if (inQuotes && line[i + 1] === '"') {
+        cur += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (ch === ',' && !inQuotes) {
+      out.push(cur.trim());
+      cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  out.push(cur.trim());
+  return out;
+}
+
+export function parsePastedChallanTableText(rawText: string): ChallanRecord[] {
+  const clean = String(rawText || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const lines = clean
+    .split('\n')
+    .map((l) => l.trimEnd())
+    .filter((l) => l.trim().length > 0);
+  if (lines.length === 0) return [];
+
+  const preferTab = lines.some((l) => l.includes('\t'));
+  const grid = lines.map((l) => splitDelimitedLine(l, preferTab));
+
+  const firstRowTokens = (grid[0] || []).map((cell) => normColKey(cell));
+  const challanHeaderHintTokens = [
+    'challanno', 'mainchallanno', 'taxchallanno', 'challandate', 'dealername', 'dealer',
+    'category', 'challantype', 'depositedamount', 'recordedamount', 'dono', 'bankname',
+    'চালাননং', 'চালাননম্বর', 'চালানেরতারিখ', 'ডিলারেরনাম', 'ডিলার', 'খাত', 'জমাকৃতটাকা', 'ব্যাংক',
+  ];
+  const looksLikeHeader = firstRowTokens.some((tok) =>
+    challanHeaderHintTokens.some((h) => tok === h || tok.includes(h))
+  );
+
+  if (looksLikeHeader) {
+    return parseChallanRowsFromTable(grid);
+  }
+
+  // No header pasted (e.g., raw rows copied from Google Sheet Version History):
+  // Default Challan tab column order: challanNo, challanDate, category, dealerName, challanType, bankName, doNo, recordedAmount, depositedAmount, note, createdAt, dealerAllocationId, doDate, allocationQty, id
+  const defaultHeaders = [...ALLOC_SHEET_TABS.challans.headers];
+  const withDefaultHeaders = parseChallanRowsFromTable([defaultHeaders, ...grid]);
+  if (withDefaultHeaders.length > 0 && withDefaultHeaders.some((c) => c.challanNo || c.depositedAmount > 0)) {
+    return withDefaultHeaders;
+  }
+
+  // Fallback smart inference per row when pasted columns are in a custom order
+  const inferred: ChallanRecord[] = [];
+  const seenIds = new Set<string>();
+  grid.forEach((cells, idx) => {
+    const nonEmpty = cells.map((c) => c.trim()).filter(Boolean);
+    if (nonEmpty.length === 0) return;
+    let dateVal = '';
+    let categoryVal: AllocationCategory | '' = '';
+    let typeVal: ChallanRecord['challanType'] = 'মূল চালান';
+    const numericCells: number[] = [];
+    const textCandidates: string[] = [];
+
+    for (const cell of nonEmpty) {
+      const parsedDate = parseDateStr(cell);
+      if (!dateVal && /^\d{4}-\d{2}-\d{2}$/.test(parsedDate)) {
+        dateVal = parsedDate;
+        continue;
+      }
+      if (cell.includes('আয়কর') || cell.toLowerCase().includes('tax')) {
+        typeVal = 'আয়কর চালান';
+        continue;
+      }
+      if (cell.includes('মূল চালান')) {
+        typeVal = 'মূল চালান';
+        continue;
+      }
+      const catGuess = normalizeCategoryName(cell);
+      if (!categoryVal && (cell.includes('খাদ্য') || cell.includes('ওএমএস') || cell.includes('ইপি') || cell.includes('ভিজিএফ') || cell.includes('কাবিখা') || cell.includes('জি আর') || cell.includes('ভিডাব্লিউ'))) {
+        categoryVal = catGuess;
+        continue;
+      }
+      const cleanedNum = Number(bnToEnDigits(cell).replace(/[,৳\s]/g, ''));
+      if (/^[\d০-৯.,]+$/.test(cell.replace(/[,৳\s]/g, '')) && Number.isFinite(cleanedNum)) {
+        numericCells.push(cleanedNum);
+      } else {
+        textCandidates.push(cell);
+      }
+    }
+
+    const challanNo =
+      textCandidates.find((t) => /[\d০-৯]/.test(t) && t.length <= 24) ||
+      (numericCells.length > 0 && Number.isInteger(numericCells[0]) && numericCells[0] > 0 && numericCells[0] < 100000000 && numericCells.length > 1
+        ? String(numericCells.shift()!)
+        : '');
+    const dealerName = textCandidates.find((t) => t !== challanNo) || '';
+    const amountNums = numericCells.filter((n) => n >= 100);
+    const depositedAmount = amountNums.length > 0 ? round2(amountNums[amountNums.length - 1]) : 0;
+    const recordedAmount = amountNums.length > 1 ? round2(amountNums[0]) : depositedAmount;
+
+    if (!normChallanNo(challanNo) && depositedAmount <= 0) return;
+
+    inferred.push({
+      id: makeDeterministicChallanId(
+        'ch-paste',
+        typeVal,
+        challanNo,
+        dateVal,
+        dealerName,
+        categoryVal || 'খাদ্য বান্ধব',
+        idx,
+        seenIds
+      ),
+      challanNo,
+      challanDate: dateVal,
+      category: categoryVal || 'খাদ্য বান্ধব',
+      dealerName,
+      challanType: typeVal,
+      bankName: '',
+      doNo: '',
+      recordedAmount,
+      depositedAmount,
+      note: 'পেস্ট থেকে পুনরুদ্ধার',
+      createdAt: dateVal ? `${dateVal}T00:00:00.000Z` : '2025-01-01T00:00:00.000Z',
+    });
+  });
+
+  return deduplicateChallanRecords(inferred);
+}
+
+export function parseChallanRowsFromTable(rows: unknown[][], workbookPreferMdy = false): ChallanRecord[] {
   const challanRows = mapRowsByHeader(rows);
   const preferMdy = detectPreferMdy(rows) || workbookPreferMdy;
   const out: ChallanRecord[] = [];
+  const seenIds = new Set<string>();
 
   challanRows.forEach((r, i) => {
     const dealerName = pickField(r, [
@@ -1828,7 +2253,6 @@ function parseChallanRowsFromTable(rows: unknown[][], workbookPreferMdy = false)
       pickField(r, ['DO_Date', 'doDate', 'ডিও তারিখ']),
       preferMdy
     ) || undefined;
-    const createdAt = pickField(r, ['Created_At', 'createdAt', 'timestamp']) || new Date().toISOString();
 
     const mainNo = pickField(r, [
       'Challan_No', 'challanNo', 'Challan Number', 'ChallanNumber', 'Challan',
@@ -1853,6 +2277,9 @@ function parseChallanRowsFromTable(rows: unknown[][], workbookPreferMdy = false)
         preferMdy
       ) || mainDate;
 
+    const rawCreatedAt = pickField(r, ['Created_At', 'createdAt', 'timestamp']);
+    const stableCreatedAt = rawCreatedAt || (mainDate ? `${mainDate}T00:00:00.000Z` : '2025-01-01T00:00:00.000Z');
+
     const rawType = pickField(r, ['Challan_Type', 'challanType', 'type', 'Type', 'kind', 'ধরন', 'চালানের ধরন']);
     const rate = pickNum(r, ['rate', 'unitPrice', 'দর']);
     const qty = pickNum(r, ['quantity', 'qty', 'allocationQty', 'পরিমাণ']);
@@ -1874,12 +2301,16 @@ function parseChallanRowsFromTable(rows: unknown[][], workbookPreferMdy = false)
     ]);
 
     const parsedQty = qty > 0 ? round3(qty) : undefined;
+    const rawRowId = pickField(r, ['ID', 'id']);
 
     // Case A: Row has BOTH explicit main + tax challan columns -> split cleanly into 2 records
     if (taxNoExplicit && (mainNo || depMain > 0)) {
       if (mainNo || dealerName || dealerAllocationId) {
+        const mId = rawRowId
+          ? makeUniqueId(rawRowId, 'ch-ext-m', i, seenIds)
+          : makeDeterministicChallanId('ch-ext-m', 'মূল চালান', mainNo, mainDate, dealerName, baseCategory, i, seenIds);
         out.push({
-          id: pickField(r, ['ID', 'id']) || `ch-ext-m-${i}-${uid('c')}`,
+          id: mId,
           challanNo: mainNo,
           challanDate: mainDate,
           category: baseCategory,
@@ -1893,46 +2324,68 @@ function parseChallanRowsFromTable(rows: unknown[][], workbookPreferMdy = false)
           recordedAmount: recMain,
           depositedAmount: depMain,
           note,
-          createdAt,
+          createdAt: stableCreatedAt,
         });
       }
-      out.push({
-        id: `ch-ext-t-${i}-${uid('t')}`,
-        challanNo: taxNoExplicit,
-        challanDate: taxDate,
-        category: baseCategory,
-        dealerName,
-        dealerAllocationId: dealerAllocationId || undefined,
-        challanType: 'আয়কর চালান',
-        bankName,
-        doNo,
-        doDate,
-        allocationQty: parsedQty,
-        recordedAmount: recTax,
-        depositedAmount: depTax,
-        note,
-        createdAt,
-      });
+      const sameAsMainNo =
+        Boolean(mainNo) && normChallanNo(taxNoExplicit) === normChallanNo(mainNo);
+      if (!sameAsMainNo || depTax > 0) {
+        const tId = makeDeterministicChallanId(
+          'ch-ext-t',
+          'আয়কর চালান',
+          taxNoExplicit,
+          taxDate,
+          dealerName,
+          baseCategory,
+          i,
+          seenIds
+        );
+        out.push({
+          id: tId,
+          challanNo: taxNoExplicit,
+          challanDate: taxDate,
+          category: baseCategory,
+          dealerName,
+          dealerAllocationId: dealerAllocationId || undefined,
+          challanType: 'আয়কর চালান',
+          bankName,
+          doNo,
+          doDate,
+          allocationQty: parsedQty,
+          recordedAmount: recTax,
+          depositedAmount: depTax,
+          note,
+          createdAt: stableCreatedAt,
+        });
+      }
       return;
     }
 
     // Case B: Single challan per row
     const finalNo = mainNo || taxNoExplicit;
     if (!finalNo && !dealerName && !dealerAllocationId) return;
+    if (!finalNo && depMain <= 0 && depTax <= 0 && recMain <= 0 && recTax <= 0) return;
+    if (!finalNo && /^(মোট|সর্বমোট|total|grand\s*total)$/i.test(dealerName.trim())) return;
     const isTax =
       rawType.includes('আয়কর') ||
       rawType.toLowerCase().includes('tax') ||
       rawType.toLowerCase().includes('vat') ||
       (!mainNo && Boolean(taxNoExplicit));
 
+    const cType: ChallanRecord['challanType'] = isTax ? 'আয়কর চালান' : 'মূল চালান';
+    const cDate = isTax ? taxDate : mainDate;
+    const cId = rawRowId
+      ? makeUniqueId(rawRowId, 'ch-ext', i, seenIds)
+      : makeDeterministicChallanId('ch-ext', cType, finalNo, cDate, dealerName, baseCategory, i, seenIds);
+
     out.push({
-      id: pickField(r, ['ID', 'id']) || `ch-ext-${i}-${uid('c')}`,
+      id: cId,
       challanNo: finalNo,
-      challanDate: isTax ? taxDate : mainDate,
+      challanDate: cDate,
       category: baseCategory,
       dealerName,
       dealerAllocationId: dealerAllocationId || undefined,
-      challanType: isTax ? 'আয়কর চালান' : 'মূল চালান',
+      challanType: cType,
       bankName,
       doNo,
       doDate,
@@ -1940,11 +2393,11 @@ function parseChallanRowsFromTable(rows: unknown[][], workbookPreferMdy = false)
       recordedAmount: isTax ? recTax || recMain : recMain,
       depositedAmount: isTax ? depTax || depMain : depMain,
       note,
-      createdAt,
+      createdAt: stableCreatedAt,
     });
   });
 
-  return out;
+  return deduplicateChallanRecords(out);
 }
 
 export async function fetchExternalChallansFromSheet(
@@ -1968,7 +2421,7 @@ export async function fetchExternalChallansFromSheet(
     for (const tab of candidates.slice(0, 6)) {
       const escaped = tab.replace(/'/g, "''");
       const resp = await googleFetch<{ valueRanges?: Array<{ values?: unknown[][] }> }>(
-        `${SHEETS_API_BASE}/${encodeURIComponent(spreadsheetId)}/values:batchGet?ranges=${encodeURIComponent(`'${escaped}'!A1:Z`)}&majorDimension=ROWS&valueRenderOption=UNFORMATTED_VALUE`,
+        `${SHEETS_API_BASE}/${encodeURIComponent(spreadsheetId)}/values:batchGet?ranges=${encodeURIComponent(`'${escaped}'!A1:ZZ`)}&majorDimension=ROWS&valueRenderOption=UNFORMATTED_VALUE`,
         accessToken
       );
       const parsed = parseChallanRowsFromTable(resp.valueRanges?.[0]?.values || []);
@@ -2103,7 +2556,7 @@ export async function fetchAllocationFromOAuthSheet(
       matchedTabNames.push(candidates[0]);
       for (const cand of candidates.slice(0, 2)) {
         const escaped = cand.replace(/'/g, "''");
-        ranges.push(`'${escaped}'!A1:Z`);
+        ranges.push(`'${escaped}'!A1:ZZ`);
         rangeRefs.push({ key, title: cand });
       }
     }
@@ -2316,15 +2769,30 @@ const TAB_COLUMN_ALIASES: Record<AllocationTabKey, Record<string, string[]>> = {
   },
   challans: {
     id: ['id', 'rowid', 'challanid', 'uid'],
-    challanNo: ['challanno', 'challannumber', 'mainchallanno', 'চালাননং', 'চালাননম্বর', 'চালান'],
-    challanDate: ['challandate', 'mainchallandate', 'date', 'তারিখ', 'চালানেরতারিখ'],
-    category: ['category', 'khath', 'khat', 'খাত', 'কর্মসূচি', 'program', 'scheme'],
-    dealerName: ['dealername', 'dealer', 'recipientname', 'ডিলার', 'ডিলারেরনাম', 'প্রাপক'],
-    challanType: ['challantype', 'type', 'ধরন', 'চালানেরধরন'],
-    bankName: ['bankname', 'bank', 'ব্যাংক', 'ব্যাংকেরনাম'],
-    doNo: ['dono', 'donumber', 'ডিওনং'],
-    recordedAmount: ['recordedamount', 'requiredamount', 'রেকর্ডটাকা'],
-    depositedAmount: ['depositedamount', 'challanamount', 'amount', 'জমাকৃতটাকা'],
+    challanNo: [
+      'challanno', 'challannumber', 'challan', 'mainchallanno', 'trxid', 'voucherno',
+      'চালাননং', 'চালাননম্বর', 'চালান', 'মূলচালাননং', 'মূলচালান', 'ট্রেজারিচালাননং',
+    ],
+    challanDate: [
+      'challandate', 'mainchallandate', 'date', 'entrydate',
+      'তারিখ', 'চালানেরতারিখ', 'জমারতারিখ',
+    ],
+    category: ['category', 'khath', 'khat', 'খাত', 'খাতেরনাম', 'কর্মসূচি', 'কর্মসূচিরনাম', 'program', 'scheme', 'sector', 'head'],
+    dealerName: [
+      'dealername', 'dealer', 'recipientname', 'recipient', 'partyname', 'party', 'name',
+      'ডিলার', 'ডিলারেরনাম', 'প্রাপক', 'প্রাপকেরনাম', 'প্রতিষ্ঠান', 'নাম',
+    ],
+    challanType: ['challantype', 'type', 'kind', 'ধরন', 'চালানেরধরন'],
+    bankName: ['bankname', 'bank', 'branch', 'ব্যাংক', 'ব্যাংকেরনাম', 'ব্যাংকওশাখা'],
+    doNo: ['dono', 'donumber', 'do', 'ডিওনং', 'ডিওনম্বর', 'ডিও'],
+    recordedAmount: [
+      'recordedamount', 'requiredamount', 'payableamount', 'targetamount',
+      'রেকর্ডঅনুযায়ীটাকা', 'রেকর্ডটাকা', 'রেকর্ড', 'ধার্যকৃতটাকা', 'প্রদেয়টাকা',
+    ],
+    depositedAmount: [
+      'depositedamount', 'paidamount', 'depositamount', 'challanamount', 'amount', 'totalamount',
+      'মূলচালানটাকা', 'জমাকৃতটাকা', 'জমারপরিমাণ', 'জমা', 'মোটটাকা', 'টাকা',
+    ],
     note: ['note', 'remarks', 'comment', 'মন্তব্য'],
     createdAt: ['createdat', 'timestamp', 'updatedat', 'created'],
     dealerAllocationId: ['dealerallocationid', 'suballocationid', 'allocationid'],
@@ -2412,6 +2880,19 @@ function toCleanIsoDate(val: unknown): string {
   return /^\d{4}-\d{2}-\d{2}$/.test(parsed) ? parsed : s;
 }
 
+function normalizeGrainType(raw: unknown, fallback: GrainType = 'চাল'): GrainType {
+  const s = String(raw ?? '').trim();
+  if (!s) return fallback;
+  const low = s.toLowerCase();
+  if (s.includes('কার্নেল') || low.includes('kernel') || low.includes('frk') || s.includes('ফর্টিফাইড')) {
+    return 'কার্নেল';
+  }
+  if (s.includes('গম') || low.includes('wheat')) return 'গম';
+  if (s.includes('আটা') || low.includes('atta') || low.includes('flour')) return 'আটা';
+  if (s.includes('চাল') || low.includes('rice')) return 'চাল';
+  return fallback;
+}
+
 function resolveGrainForCategory(
   cat: AllocationCategory,
   ministryAllocs: MinistryAllocation[],
@@ -2425,6 +2906,7 @@ function resolveGrainForCategory(
     if (hit?.grain) return hit.grain;
   }
   const low = cat.toLowerCase();
+  if (cat.includes('কার্নেল') || low.includes('kernel')) return 'কার্নেল';
   if (cat.includes('গম') || low.includes('wheat')) return 'গম';
   if (cat.includes('আটা') || low.includes('atta')) return 'আটা';
   return 'চাল';
@@ -2452,7 +2934,7 @@ function computeFiscalYearFormatted(dateStr: string, sampleStyle = ''): string {
   return fullEn;
 }
 
-function projectPayloadRowsForExistingSheet(
+export function projectPayloadRowsForExistingSheet(
   payload: BuiltSheetTabPayload,
   existingGrid: unknown[][]
 ): { startRow: number; rows: Array<Array<string | number>> } {
@@ -2517,11 +2999,25 @@ function projectPayloadRowsForExistingSheet(
   }
 
   const idIncomingIdx = incomingHeaders.findIndex((h) => normColKey(h) === 'id');
+  const challanTypeIncomingIdx =
+    payload.key === 'challans'
+      ? incomingHeaders.findIndex((h) => normColKey(h) === 'challantype')
+      : -1;
   const dateIncomingIdx = payload.dateFieldKey
     ? incomingHeaders.findIndex((h) => normColKey(h) === normColKey(payload.dateFieldKey))
     : -1;
   const hasIdCol = existingHeaders.some((h) => aliasToIncomingIdx.get(normColKey(h)) === idIncomingIdx);
-  const targetHeaders = hasIdCol || idIncomingIdx < 0 ? [...existingHeaders] : [...existingHeaders, 'id'];
+  const hasChallanTypeCol =
+    challanTypeIncomingIdx >= 0 &&
+    existingHeaders.some((h) => aliasToIncomingIdx.get(normColKey(h)) === challanTypeIncomingIdx);
+  const needsChallanTypeCol =
+    payload.key === 'challans' &&
+    challanTypeIncomingIdx >= 0 &&
+    !hasChallanTypeCol &&
+    payload.rows.slice(1).some((r) => String(r[challanTypeIncomingIdx] ?? '').includes('আয়কর'));
+  const targetHeaders = [...existingHeaders];
+  if (!hasIdCol && idIncomingIdx >= 0) targetHeaders.push('id');
+  if (needsChallanTypeCol) targetHeaders.push('challanType');
 
   // Gather existing data rows for preserving custom unknown columns, FY style, and status/constant defaults
   const oldRowsById = new Map<string, unknown[]>();
@@ -2571,6 +3067,13 @@ function projectPayloadRowsForExistingSheet(
     }
   });
 
+  const splitTaxColTokens = new Set([
+    'taxchallanno', 'incometaxchallanno', 'আয়করচালাননং', 'আয়করচালান', 'ভ্যাটআয়করচালান', 'ট্যাক্সচালান',
+    'taxchallandate', 'incometaxdate', 'আয়করতারিখ', 'আয়করচালানেরতারিখ',
+    'taxchallanamount', 'incometaxamount', 'taxamount', 'depositedtaxamount', 'আয়করটাকা', 'আয়করেরপরিমাণ',
+    'requiredtaxamount', 'recordedtaxamount', 'রেকর্ডআয়কর',
+  ]);
+
   const projectedRows: Array<Array<string | number>> = [targetHeaders];
   for (let rIdx = 1; rIdx < payload.rows.length; rIdx++) {
     const srcRow = payload.rows[rIdx];
@@ -2593,6 +3096,10 @@ function projectPayloadRowsForExistingSheet(
       }
       if (grainColTokens.includes(nh) && payload.grainValues?.[rIdx - 1]) {
         return payload.grainValues[rIdx - 1];
+      }
+      // Never copy old embedded Tax_Challan_* values onto split challan rows (prevents roundtrip duplication)
+      if (payload.key === 'challans' && splitTaxColTokens.has(nh)) {
+        return '';
       }
       if (oldRow && colIdx < existingHeaders.length) {
         const oldVal = oldRow[colIdx];
@@ -2818,23 +3325,40 @@ function projectRowsForSheet_(sheet, t) {
     if (allOld) return { startRow: headerIdx + 1, rows: rows };
   }
   var idInIdx = -1;
+  var challanTypeInIdx = -1;
   var dateInIdx = -1;
   var dkNorm = t.dateFieldKey ? normColKey_(t.dateFieldKey) : '';
   for (var ii = 0; ii < incomingHeaders.length; ii++) {
     var ink = normColKey_(incomingHeaders[ii]);
     if (ink === 'id') idInIdx = ii;
+    if (t.key === 'challans' && ink === 'challantype') challanTypeInIdx = ii;
     if (dkNorm && ink === dkNorm) dateInIdx = ii;
   }
   var hasId = false;
+  var hasChallanType = false;
   var existingIdCol = -1;
   for (var eh = 0; eh < existingHeaders.length; eh++) {
-    if (aliasMap[normColKey_(existingHeaders[eh])] === idInIdx && idInIdx >= 0) {
+    var mappedIdx = aliasMap[normColKey_(existingHeaders[eh])];
+    if (mappedIdx === idInIdx && idInIdx >= 0) {
       hasId = true;
       existingIdCol = eh;
-      break;
+    }
+    if (mappedIdx === challanTypeInIdx && challanTypeInIdx >= 0) {
+      hasChallanType = true;
     }
   }
-  var targetHeaders = (hasId || idInIdx < 0) ? existingHeaders.slice() : existingHeaders.concat(['id']);
+  var needsChallanType = false;
+  if (t.key === 'challans' && challanTypeInIdx >= 0 && !hasChallanType) {
+    for (var ctr = 1; ctr < rows.length; ctr++) {
+      if (String(rows[ctr][challanTypeInIdx] || '').indexOf('আয়কর') >= 0) {
+        needsChallanType = true;
+        break;
+      }
+    }
+  }
+  var targetHeaders = existingHeaders.slice();
+  if (!hasId && idInIdx >= 0) targetHeaders.push('id');
+  if (needsChallanType) targetHeaders.push('challanType');
   var oldRowsById = {};
   var oldDataRows = existingGrid.slice(headerIdx + 1);
   if (existingIdCol >= 0) {
@@ -2874,6 +3398,7 @@ function projectRowsForSheet_(sheet, t) {
       if (bestV) colModes[ci] = bestV;
     }
   }
+  var splitTaxTokens = ['taxchallanno','incometaxchallanno','আয়করচালাননং','আয়করচালান','ভ্যাটআয়করচালান','ট্যাক্সচালান','taxchallandate','incometaxdate','আয়করতারিখ','আয়করচালানেরতারিখ','taxchallanamount','incometaxamount','taxamount','depositedtaxamount','আয়করটাকা','আয়করেরপরিমাণ','requiredtaxamount','recordedtaxamount','রেকর্ডআয়কর'];
   var out = [targetHeaders];
   var gVals = Array.isArray(t.grainValues) ? t.grainValues : [];
   for (var ri = 1; ri < rows.length; ri++) {
@@ -2894,6 +3419,8 @@ function projectRowsForSheet_(sheet, t) {
         line.push(oldFy || computeFiscalYear_(rDate, fySample));
       } else if (grainTokens.indexOf(thn) >= 0 && gVals[ri - 1]) {
         line.push(gVals[ri - 1]);
+      } else if (t.key === 'challans' && splitTaxTokens.indexOf(thn) >= 0) {
+        line.push('');
       } else if (oldRow && tj < existingHeaders.length && String(cellToVal_(oldRow[tj])).trim() !== '') {
         line.push(cellToVal_(oldRow[tj]));
       } else {
@@ -3020,6 +3547,59 @@ function syncAllTabsFromApp_(payload) {
     }
     for (var s = 0; s < writeSheets.length; s++) {
       var sheet = writeSheets[s];
+      if (t.key === 'challans' && !(payload && payload.allowChallanShrink)) {
+        var existingRowsCount = sheet.getLastRow();
+        var existingColsCount = sheet.getLastColumn();
+        if (existingRowsCount > 1 && existingColsCount >= 1) {
+          var delKeys = {};
+          var rawDel = (payload && Array.isArray(payload.deletedChallanKeys)) ? payload.deletedChallanKeys : [];
+          for (var dk = 0; dk < rawDel.length; dk++) {
+            delKeys[String(rawDel[dk] || '')] = true;
+          }
+          var normChNo_ = function(v) {
+            var sVal = String(v === null || v === undefined ? '' : v).replace(/[০-৯]/g, function(d) {
+              return String('০১২৩৪৫৬৭৮৯'.indexOf(d));
+            }).replace(/[\u200B-\u200D\uFEFF]/g, '').trim().replace(/^'+/, '').replace(/[–—]/g, '-').replace(/\s+/g, '').toLowerCase();
+            if (!sVal || /^[-_.]+$/.test(sVal) || sVal === 'n/a' || sVal === 'na' || sVal === 'none' || sVal === 'nil' || sVal === 'null' || sVal === 'নেই') return '';
+            sVal = sVal.replace(/^(\d+)\.0+$/, '$1').replace(/^0+(?=\d)/, '');
+            return /^0+$/.test(sVal) ? '' : sVal;
+          };
+          var exGrid = sheet.getRange(1, 1, existingRowsCount, existingColsCount).getValues();
+          var exHdr = (exGrid[0] || []).map(function(h) { return normColKey_(h); });
+          var exNoCol = -1;
+          var exTypeCol = -1;
+          for (var ehc = 0; ehc < exHdr.length; ehc++) {
+            if (exNoCol < 0 && ['challanno','mainchallanno','challan','চালাননং','চালাননম্বর','মূলচালান'].indexOf(exHdr[ehc]) >= 0) exNoCol = ehc;
+            if (exTypeCol < 0 && ['challantype','type','ধরন','চালানেরধরন'].indexOf(exHdr[ehc]) >= 0) exTypeCol = ehc;
+          }
+          if (exNoCol >= 0) {
+            var inHdr = (t.rows[0] || []).map(function(h) { return normColKey_(h); });
+            var inNoCol = inHdr.indexOf('challanno');
+            var inTypeCol = inHdr.indexOf('challantype');
+            var incomingKeySet = {};
+            for (var ir = 1; ir < t.rows.length; ir++) {
+              var inNo = inNoCol >= 0 ? normChNo_(t.rows[ir][inNoCol]) : '';
+              var inTp = inTypeCol >= 0 ? String(t.rows[ir][inTypeCol] || 'মূল চালান').trim() : 'মূল চালান';
+              if (inNo) incomingKeySet[inNo + '::' + inTp] = true;
+            }
+            var missingInIncoming = 0;
+            for (var er = 1; er < exGrid.length; er++) {
+              var exNo = normChNo_(cellToVal_(exGrid[er][exNoCol]));
+              var exTpRaw = exTypeCol >= 0 ? String(cellToVal_(exGrid[er][exTypeCol]) || '') : '';
+              var exTp = (exTpRaw.indexOf('আয়কর') >= 0 || exTpRaw.toLowerCase().indexOf('tax') >= 0) ? 'আয়কর চালান' : 'মূল চালান';
+              if (exNo && !incomingKeySet[exNo + '::' + exTp] && !delKeys[exNo + '::' + exTp]) {
+                missingInIncoming++;
+              }
+            }
+            if (missingInIncoming > 0) {
+              return {
+                ok: false,
+                error: 'সুরক্ষা ব্লক: Google Sheet-এ আরও ' + missingInIncoming + 'টি চালান রয়েছে যা আপনার বর্তমান অ্যাপ তালিকায় নেই। আগে «লিংক সেভ ও শিট থেকে ডেটা আনুন» বা রিকভারি ব্যবহার করুন।'
+              };
+            }
+          }
+        }
+      }
       var projected = projectRowsForSheet_(sheet, t);
       var rows = projected.rows;
       var maxCols = 1;
@@ -3322,7 +3902,7 @@ export function buildAllocationSheetPayloads(
       columnAliases: TAB_COLUMN_ALIASES.challans,
       rows: [
         [...ALLOC_SHEET_TABS.challans.headers],
-        ...db.challans.map((r) => [
+        ...sortChallansCleanly(deduplicateChallanRecords(db.challans)).map((r) => [
           r.challanNo,
           toCleanIsoDate(r.challanDate),
           r.category,
@@ -3468,7 +4048,12 @@ export async function writeAllocationDatabaseToOAuthSheet(
   accessToken: string,
   rawSpreadsheetId: string,
   db: AllocationDatabase,
-  opts?: { skipChallansTab?: boolean; allowEmptyOverwrite?: boolean }
+  opts?: {
+    skipChallansTab?: boolean;
+    allowEmptyOverwrite?: boolean;
+    deletedChallanKeys?: string[];
+    allowChallanShrink?: boolean;
+  }
 ): Promise<{ ok: boolean; tabsUpdated: number }> {
   const spreadsheetId = extractSpreadsheetId(rawSpreadsheetId);
   if (!spreadsheetId) throw new Error('Google Sheet ID নির্বাচন করুন।');
@@ -3513,7 +4098,7 @@ export async function writeAllocationDatabaseToOAuthSheet(
   if (existingTargetNames.length > 0) {
     const params = new URLSearchParams();
     existingTargetNames.forEach((name) => {
-      params.append('ranges', `'${name.replace(/'/g, "''")}'!A1:ZZ500`);
+      params.append('ranges', `'${name.replace(/'/g, "''")}'!A1:ZZ`);
     });
     params.set('majorDimension', 'ROWS');
     params.set('valueRenderOption', 'UNFORMATTED_VALUE');
@@ -3545,6 +4130,40 @@ export async function writeAllocationDatabaseToOAuthSheet(
       throw new Error(
         'অ্যাপে কোনো ডেটা না থাকায় Google Sheet-এর বিদ্যমান ডেটা সুরক্ষার জন্য ওভাররাইট বাতিল করা হয়েছে। আগে «লিংক সেভ ও শিট থেকে ডেটা আনুন» চাপুন।'
       );
+    }
+  }
+
+  // Unique-challan shrink protection: never silently delete unique challans present on the Google Sheet
+  if (!opts?.allowChallanShrink && !opts?.skipChallansTab) {
+    const challanTarget = writeTargets.find(
+      (t) => t.matchedExisting && t.payload.key === 'challans'
+    );
+    if (challanTarget) {
+      const existingGrid = existingGridMap.get(challanTarget.targetName) || [];
+      if (existingGrid.length > 1) {
+        const existingUnique = parseChallanRowsFromTable(existingGrid);
+        const incomingUnique = deduplicateChallanRecords(db.challans);
+        const incomingKeys = new Set(
+          incomingUnique
+            .map((c) => {
+              const n = normChallanNo(c.challanNo);
+              return n ? `${n}::${c.challanType}` : '';
+            })
+            .filter(Boolean)
+        );
+        const deletedKeys = new Set(opts?.deletedChallanKeys || []);
+        const missingFromIncoming = existingUnique.filter((c) => {
+          const n = normChallanNo(c.challanNo);
+          if (!n) return false;
+          const k = `${n}::${c.challanType}`;
+          return !incomingKeys.has(k) && !deletedKeys.has(k);
+        });
+        if (missingFromIncoming.length > 0) {
+          throw new Error(
+            `সুরক্ষা ব্লক: Google Sheet-এ আরও ${toBnDigits(missingFromIncoming.length)}টি চালান (${missingFromIncoming.slice(0, 4).map((c) => c.challanNo).join(', ')}) রয়েছে যা অ্যাপে নেই। এগুলো হারানো ঠেকাতে শিটে ওভাররাইট স্থগিত করা হলো—আগে «লিংক সেভ ও শিট থেকে ডেটা আনুন» বা রিকভারি ব্যবহার করুন।`
+          );
+        }
+      }
     }
   }
 
@@ -3625,7 +4244,12 @@ export async function writeAllocationDatabaseToAppsScript(
   rawAppsScriptUrl: string,
   rawSpreadsheetId: string,
   db: AllocationDatabase,
-  opts?: { skipChallansTab?: boolean; allowEmptyOverwrite?: boolean }
+  opts?: {
+    skipChallansTab?: boolean;
+    allowEmptyOverwrite?: boolean;
+    deletedChallanKeys?: string[];
+    allowChallanShrink?: boolean;
+  }
 ): Promise<{ ok: boolean; tabsUpdated: number }> {
   const cleanUrl = rawAppsScriptUrl.trim();
   if (!cleanUrl || (!cleanUrl.startsWith('https://') && !cleanUrl.startsWith('http://'))) {
@@ -3637,6 +4261,8 @@ export async function writeAllocationDatabaseToAppsScript(
     spreadsheetId,
     tabs: payloads,
     allowEmptyOverwrite: Boolean(opts?.allowEmptyOverwrite),
+    deletedChallanKeys: opts?.deletedChallanKeys || [],
+    allowChallanShrink: Boolean(opts?.allowChallanShrink),
   });
   if (!res.ok) {
     throw new Error(res.error || 'Apps Script-এর মাধ্যমে Google Sheet-এ সেভ করা যায়নি।');
