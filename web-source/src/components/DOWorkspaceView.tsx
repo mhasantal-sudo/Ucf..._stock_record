@@ -6,10 +6,13 @@ import {
   Check,
   CheckCircle2,
   FileCheck2,
+  Link2,
+  Lock,
   Pencil,
   Search,
   Sparkles,
   Trash2,
+  Unlock,
   X,
 } from 'lucide-react';
 import {
@@ -32,6 +35,7 @@ import {
   isChallanOnOrBeforeDo,
   isSamePartyName,
   normChallanNo,
+  normDoNo,
   normMemoNo,
   parseNum,
   round3,
@@ -102,6 +106,10 @@ interface DOWorkspaceViewProps {
     patch: { doNo: string; issueDate: string; allocationQty: number }
   ) => ActionResult;
   onDeleteDOIssue: (id: string) => void;
+  onRelinkChallan?: (
+    challanId: string,
+    target: { dealerAllocationId?: string; doNo?: string; clearLink?: boolean }
+  ) => ActionResult;
 }
 
 export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
@@ -119,8 +127,9 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
   onIssueDOBatch,
   onUpdateDOIssue,
   onDeleteDOIssue,
+  onRelinkChallan,
 }) => {
-  const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
+  const [feedback, setFeedback] = useState<{ ok: boolean; text: string; warning?: string } | null>(null);
 
   // DO Book form
   const [editingBookId, setEditingBookId] = useState<string | null>(null);
@@ -136,6 +145,11 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
     Record<string, { doNo: string; date: string }>
   >({});
   const [verifyTargetKey, setVerifyTargetKey] = useState<string | null>(null);
+  const [showChallanLocks, setShowChallanLocks] = useState(false);
+  const [challanLockSearch, setChallanLockSearch] = useState('');
+  const [challanTargetDrafts, setChallanTargetDrafts] = useState<Record<string, string>>({});
+  const [manualRelinkPickByRow, setManualRelinkPickByRow] = useState<Record<string, string>>({});
+  const [editingDoChallanId, setEditingDoChallanId] = useState<string>('');
   const [doSearch, setDoSearch] = useState('');
   const [editingDoRow, setEditingDoRow] = useState<{
     id: string;
@@ -160,6 +174,7 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
     setFeedback({
       ok: res.ok,
       text: res.ok ? res.message || 'সম্পন্ন হয়েছে।' : res.error || 'ত্রুটি ঘটেছে।',
+      warning: res.warning,
     });
   };
 
@@ -202,7 +217,7 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
   }, [pendingRecipients, doCatFilter]);
 
   const issuedSet = useMemo(
-    () => new Set(db.doIssues.map((d) => bnToEnDigits(String(d.doNo)).trim())),
+    () => new Set(db.doIssues.map((d) => normDoNo(d.doNo)).filter(Boolean)),
     [db.doIssues]
   );
 
@@ -222,6 +237,7 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
   }, [db.ministryAllocations]);
 
   const resolveItemGrain = (category: AllocationCategory, ministryMemo?: string): string => {
+    if (category === 'কার্নেল') return 'কার্নেল';
     if (!ministryMemo) return '';
     return (
       ministryGrainByKey.get(`${category}::${ministryMemo}`) ||
@@ -272,16 +288,57 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
       const digits = bnToEnDigits(no || '').replace(/\D/g, '');
       return digits ? Number(digits) : Number.MAX_SAFE_INTEGER;
     };
-    const ordered = [...filteredPending].sort((a, b) => {
-      const dA = toIsoDateStr(pendingInputs[a.key]?.date || doBatchDate) || '9999-12-31';
-      const dB = toIsoDateStr(pendingInputs[b.key]?.date || doBatchDate) || '9999-12-31';
-      if (dA !== dB) return dA.localeCompare(dB);
-      const uA = toIsoDateStr(a.unoDate) || '9999-12-31';
-      const uB = toIsoDateStr(b.unoDate) || '9999-12-31';
-      if (uA !== uB) return uA.localeCompare(uB);
-      return doNumVal(pendingInputs[a.key]?.doNo || '') - doNumVal(pendingInputs[b.key]?.doNo || '');
-    });
-    for (const p of ordered) {
+    const subChallanNormSet = new Set(
+      db.challans.map((c) => normMemoNo(c.dealerAllocationId)).filter(Boolean)
+    );
+    const sameMonthUnlinkedChallans = db.challans.filter((c) => !c.doNo);
+    const itemHasExactMonthChallan = (p: (typeof filteredPending)[number]): boolean => {
+      const uIso = toIsoDateStr(p.unoDate);
+      const uMonth = uIso ? uIso.slice(0, 7) : '';
+      if (!uMonth) return false;
+      return sameMonthUnlinkedChallans.some((c) => {
+        if (c.category !== p.category) return false;
+        const cIso = toIsoDateStr(c.challanDate);
+        if (!cIso || cIso.slice(0, 7) !== uMonth) return false;
+        if (c.dealerAllocationId) {
+          return Boolean(p.subId && normMemoNo(c.dealerAllocationId) === normMemoNo(p.subId));
+        }
+        return Boolean(c.dealerName && isSamePartyName(c.dealerName, p.recipientName));
+      });
+    };
+
+    // Pass 1: Items with explicit draft DO number, direct subId challan, or same-month challan match
+    // so an earlier month's unlinked pending row can NEVER preview-steal a later month's challan.
+    const pass1Items: typeof filteredPending = [];
+    const pass2Items: typeof filteredPending = [];
+    for (const p of filteredPending) {
+      const hasDraftDo = Boolean(pendingInputs[p.key]?.doNo?.trim());
+      const hasDirectSub = Boolean(p.subId && subChallanNormSet.has(normMemoNo(p.subId)));
+      if (hasDraftDo || hasDirectSub || itemHasExactMonthChallan(p)) {
+        pass1Items.push(p);
+      } else {
+        pass2Items.push(p);
+      }
+    }
+
+    const sortByIssueAndUno = (list: typeof filteredPending) =>
+      [...list].sort((a, b) => {
+        const draftA = pendingInputs[a.key]?.doNo?.trim() ? 0 : 1;
+        const draftB = pendingInputs[b.key]?.doNo?.trim() ? 0 : 1;
+        if (draftA !== draftB) return draftA - draftB;
+        const directA = a.subId && subChallanNormSet.has(normMemoNo(a.subId)) ? 0 : 1;
+        const directB = b.subId && subChallanNormSet.has(normMemoNo(b.subId)) ? 0 : 1;
+        if (directA !== directB) return directA - directB;
+        const dA = toIsoDateStr(pendingInputs[a.key]?.date || doBatchDate) || '9999-12-31';
+        const dB = toIsoDateStr(pendingInputs[b.key]?.date || doBatchDate) || '9999-12-31';
+        if (dA !== dB) return dA.localeCompare(dB);
+        const uA = toIsoDateStr(a.unoDate) || '9999-12-31';
+        const uB = toIsoDateStr(b.unoDate) || '9999-12-31';
+        if (uA !== uB) return uA.localeCompare(uB);
+        return doNumVal(pendingInputs[a.key]?.doNo || '') - doNumVal(pendingInputs[b.key]?.doNo || '');
+      });
+
+    for (const p of [...sortByIssueAndUno(pass1Items), ...sortByIssueAndUno(pass2Items)]) {
       const targetDate = pendingInputs[p.key]?.date || doBatchDate;
       const check = verifyChallan(p.category, p.recipientName, p.remaining, {
         subId: p.subId,
@@ -296,23 +353,37 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
       map.set(p.key, check);
     }
     return map;
-  }, [filteredPending, pendingInputs, doBatchDate, verifyChallan]);
+  }, [db.challans, filteredPending, pendingInputs, doBatchDate, verifyChallan]);
 
   const buildUsedDoDraftSet = (
     draftMap: Record<string, { doNo: string; date: string }>
   ): Set<string> => {
     const used = new Set<string>(issuedSet);
     for (const val of Object.values(draftMap)) {
-      const cleaned = bnToEnDigits(val?.doNo || '').trim();
+      const cleaned = normDoNo(val?.doNo);
       if (cleaned) used.add(cleaned);
     }
     return used;
   };
 
+  const draftUsedSet = useMemo(
+    () => buildUsedDoDraftSet(pendingInputs),
+    [issuedSet, pendingInputs]
+  );
+
+  const availableDatalistDos = useMemo(
+    () =>
+      sortedUnusedList.filter((u) => {
+        const key = normDoNo(u.doNo);
+        return Boolean(key) && !draftUsedSet.has(key);
+      }),
+    [sortedUnusedList, draftUsedSet]
+  );
+
   const findNextLowestUnusedDo = (usedSet: Set<string>): string | null => {
     for (const u of sortedUnusedList) {
-      const candidate = String(u.doNo);
-      if (!usedSet.has(candidate)) return candidate;
+      const candidateKey = normDoNo(u.doNo);
+      if (candidateKey && !usedSet.has(candidateKey)) return String(u.doNo);
     }
     return null;
   };
@@ -373,7 +444,7 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
         if (next[item.key]?.doNo?.trim()) continue;
         const candidate = findNextLowestUnusedDo(usedSet);
         if (candidate) {
-          usedSet.add(candidate);
+          usedSet.add(normDoNo(candidate));
           next[item.key] = {
             doNo: candidate,
             date: next[item.key]?.date || doBatchDate,
@@ -399,7 +470,7 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
       if (next[p.key]?.doNo?.trim()) continue;
       const assigned = findNextLowestUnusedDo(usedInDraft);
       if (!assigned) break;
-      usedInDraft.add(assigned);
+      usedInDraft.add(normDoNo(assigned));
       next[p.key] = {
         doNo: assigned,
         date: next[p.key]?.date || doBatchDate,
@@ -468,11 +539,14 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
 
   const filteredIssuedDos = useMemo(() => {
     const q = doSearch.trim().toLowerCase();
+    const qDo = normDoNo(doSearch);
     return db.doIssues.filter((d) => {
       if (doCatFilter !== 'ALL' && d.category !== doCatFilter) return false;
       if (!q) return true;
       return (
         d.doNo.toLowerCase().includes(q) ||
+        toBnDigits(d.doNo).toLowerCase().includes(q) ||
+        (Boolean(qDo) && normDoNo(d.doNo).includes(qDo)) ||
         d.recipientName.toLowerCase().includes(q) ||
         d.category.toLowerCase().includes(q) ||
         d.unionName.toLowerCase().includes(q)
@@ -533,15 +607,23 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
       )}
 
       {feedback && (
-        <div
-          className={`rounded-xl border px-4 py-2.5 text-xs font-bold flex items-center gap-2 ${
-            feedback.ok
-              ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
-              : 'border-rose-200 bg-rose-50 text-rose-900'
-          }`}
-        >
-          <CheckCircle2 className="h-4 w-4 shrink-0" />
-          <span>{feedback.text}</span>
+        <div className="space-y-2">
+          <div
+            className={`rounded-xl border px-4 py-2.5 text-xs font-bold flex items-center gap-2 ${
+              feedback.ok
+                ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+                : 'border-rose-200 bg-rose-50 text-rose-900'
+            }`}
+          >
+            <CheckCircle2 className="h-4 w-4 shrink-0" />
+            <span>{feedback.text}</span>
+          </div>
+          {feedback.warning && (
+            <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-2.5 text-xs font-bold text-amber-900 flex items-start gap-2">
+              <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5 text-amber-600" />
+              <span>চালান সিগন্যাল (ডিও সংরক্ষিত হয়েছে): {feedback.warning}</span>
+            </div>
+          )}
         </div>
       )}
 
@@ -712,7 +794,7 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
                     { length: Math.min(100, selectedBook.endPage - selectedBook.startPage + 1) },
                     (_, i) => selectedBook.startPage + i
                   ).map((p) => {
-                    const used = issuedSet.has(String(p));
+                    const used = issuedSet.has(normDoNo(p));
                     return (
                       <div
                         key={p}
@@ -779,6 +861,21 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
                   <span>খালি ডিও নং বসান ({formatBnInt(unusedList.length)}টি বাকি)</span>
                 </button>
 
+                {onRelinkChallan && (
+                  <button
+                    type="button"
+                    onClick={() => setShowChallanLocks((prev) => !prev)}
+                    className={`min-h-[44px] inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 font-bold cursor-pointer ${
+                      showChallanLocks
+                        ? 'border-slate-900 bg-slate-900 text-white'
+                        : 'border-slate-300 bg-white hover:bg-slate-50 text-slate-800'
+                    }`}
+                  >
+                    <Lock className="h-3.5 w-3.5" />
+                    <span>চালান লক তালিকা</span>
+                  </button>
+                )}
+
                 <button
                   type="button"
                   onClick={handleSaveBatchDos}
@@ -789,6 +886,161 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
                 </button>
               </div>
             </div>
+
+            {showChallanLocks && onRelinkChallan && (() => {
+              const allAllocationOptions = [
+                ...db.dealerSuballocations.map((s) => ({
+                  id: s.id,
+                  category: s.category,
+                  partyName: s.dealerName,
+                  date: s.unoDate,
+                  memo: s.unoMemo,
+                  qty: s.allocationQty,
+                  label: `${s.dealerName} · ${s.unoDate ? formatBnDate(s.unoDate) : '—'} · স্মারক ${s.unoMemo ? toBnDigits(s.unoMemo) : '—'} (${formatBnQty(s.allocationQty)} মে.টন)`,
+                })),
+                ...db.unoSuballocations.map((u) => ({
+                  id: u.id,
+                  category: u.category,
+                  partyName: u.recipientName,
+                  date: u.unoDate,
+                  memo: u.unoMemo,
+                  qty: u.allocationQty,
+                  label: `${u.recipientName} · ${u.unoDate ? formatBnDate(u.unoDate) : '—'} · স্মারক ${u.unoMemo ? toBnDigits(u.unoMemo) : '—'} (${formatBnQty(u.allocationQty)} মে.টন)`,
+                })),
+              ];
+              const subLookup = new Map(allAllocationOptions.map((o) => [normMemoNo(o.id), o]));
+              const qLock = challanLockSearch.trim().toLowerCase();
+              const visibleChallans = db.challans.filter((c) => {
+                if (doCatFilter !== 'ALL' && c.category !== doCatFilter) return false;
+                if (!qLock) return true;
+                const linkedSub = c.dealerAllocationId ? subLookup.get(normMemoNo(c.dealerAllocationId)) : undefined;
+                return (
+                  c.challanNo.toLowerCase().includes(qLock) ||
+                  toBnDigits(c.challanNo).toLowerCase().includes(qLock) ||
+                  (c.dealerName || '').toLowerCase().includes(qLock) ||
+                  (linkedSub?.label || '').toLowerCase().includes(qLock) ||
+                  (c.doNo || '').toLowerCase().includes(qLock)
+                );
+              });
+
+              return (
+                <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
+                      <Lock className="h-3.5 w-3.5 text-[#E2136E]" />
+                      <span>স্ক্যানকৃত চালান ও বরাদ্দ লক ব্যবস্থাপনা ({formatBnInt(visibleChallans.length)}টি)</span>
+                    </div>
+                    <div className="relative w-full sm:w-64">
+                      <Search className="h-3.5 w-3.5 text-slate-400 absolute left-2.5 top-2.5" />
+                      <input
+                        type="text"
+                        value={challanLockSearch}
+                        onChange={(e) => setChallanLockSearch(e.target.value)}
+                        placeholder="চালান নং / ডিলার / স্মারক খুঁজুন"
+                        className="w-full min-h-[34px] rounded-lg border border-slate-300 bg-white pl-8 pr-2.5 py-1 text-xs focus:outline-none focus:border-[#E2136E]"
+                      />
+                    </div>
+                  </div>
+                  <p className="text-[11px] text-slate-600">
+                    যেকোনো চালান যে বরাদ্দের সাথে লক করা আছে সেখানেই স্থায়ী থাকবে। পরিবর্তন করতে চাইলে এখান থেকে ম্যানুয়ালি বরাদ্দ নির্বাচন করে লক করুন বা মুক্ত করুন।
+                  </p>
+                  <div className="max-h-72 overflow-y-auto divide-y divide-slate-200 rounded-lg border border-slate-200 bg-white">
+                    {visibleChallans.length === 0 ? (
+                      <div className="py-4 text-center text-xs text-slate-500">কোনো চালান পাওয়া যায়নি।</div>
+                    ) : (
+                      visibleChallans.slice(0, 80).map((c) => {
+                        const lockedSub = c.dealerAllocationId ? subLookup.get(normMemoNo(c.dealerAllocationId)) : undefined;
+                        const catSubs = allAllocationOptions.filter((o) => o.category === c.category);
+                        const sortedSubs = [...catSubs].sort((a, b) => {
+                          const sameA = c.dealerName && isSamePartyName(a.partyName, c.dealerName) ? 0 : 1;
+                          const sameB = c.dealerName && isSamePartyName(b.partyName, c.dealerName) ? 0 : 1;
+                          if (sameA !== sameB) return sameA - sameB;
+                          return (b.date || '').localeCompare(a.date || '');
+                        });
+                        const draftTarget = challanTargetDrafts[c.id] ?? (c.dealerAllocationId || '');
+                        return (
+                          <div key={c.id} className="p-2.5 flex flex-col lg:flex-row lg:items-center justify-between gap-2 text-xs">
+                            <div className="min-w-0 space-y-0.5">
+                              <div className="flex flex-wrap items-center gap-1.5 font-bold text-slate-900">
+                                <span className={c.challanType === 'মূল চালান' ? 'text-[#E2136E]' : 'text-sky-700'}>
+                                  {c.challanType}
+                                </span>
+                                <span>· {toBnDigits(c.challanNo)}</span>
+                                <span className="font-semibold text-slate-600">({c.challanDate ? formatBnDate(c.challanDate) : '—'})</span>
+                                <span className="text-emerald-700">{formatBnMoney(c.depositedAmount)} ৳</span>
+                              </div>
+                              <div className="text-[11px] text-slate-600 flex flex-wrap items-center gap-1.5">
+                                <span className="font-semibold">{c.dealerName || lockedSub?.partyName || 'নাম নেই'}</span>
+                                <span>· {c.category}</span>
+                                {c.dealerAllocationId ? (
+                                  <span className="inline-flex items-center gap-1 rounded bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 text-[10px] font-bold text-emerald-800">
+                                    <Lock className="h-2.5 w-2.5" />
+                                    {lockedSub ? `বরাদ্দে লক: ${lockedSub.memo ? toBnDigits(lockedSub.memo) : ''} (${lockedSub.date ? formatBnDate(lockedSub.date) : ''})` : `বরাদ্দ আইডি লক: ${c.dealerAllocationId}`}
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1 rounded bg-slate-100 border border-slate-200 px-1.5 py-0.5 text-[10px] font-semibold text-slate-600">
+                                    <Unlock className="h-2.5 w-2.5" />
+                                    উন্মুক্ত
+                                  </span>
+                                )}
+                                {c.doNo && (
+                                  <span className="inline-flex items-center rounded bg-rose-50 border border-rose-200 px-1.5 py-0.5 text-[10px] font-bold text-[#E2136E]">
+                                    ডিও: {toBnDigits(c.doNo)}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                              <select
+                                value={draftTarget}
+                                onChange={(e) =>
+                                  setChallanTargetDrafts((prev) => ({ ...prev, [c.id]: e.target.value }))
+                                }
+                                className="min-h-[34px] max-w-[240px] rounded-lg border border-slate-300 bg-white px-2 py-1 text-[11px]"
+                              >
+                                <option value="">— বরাদ্দ নির্বাচন করুন —</option>
+                                {sortedSubs.map((s) => (
+                                  <option key={s.id} value={s.id}>
+                                    {s.label}
+                                  </option>
+                                ))}
+                              </select>
+                              <button
+                                type="button"
+                                disabled={!draftTarget}
+                                onClick={() => {
+                                  const res = onRelinkChallan(c.id, { dealerAllocationId: draftTarget });
+                                  showRes(res);
+                                }}
+                                className="min-h-[34px] inline-flex items-center gap-1 rounded-lg bg-slate-900 hover:bg-slate-800 disabled:opacity-40 px-2.5 py-1 text-[11px] font-bold text-white cursor-pointer"
+                              >
+                                <Link2 className="h-3 w-3" />
+                                <span>লক করুন</span>
+                              </button>
+                              {(c.dealerAllocationId || c.doNo) && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const res = onRelinkChallan(c.id, { clearLink: true });
+                                    setChallanTargetDrafts((prev) => ({ ...prev, [c.id]: '' }));
+                                    showRes(res);
+                                  }}
+                                  className="min-h-[34px] inline-flex items-center gap-1 rounded-lg border border-rose-300 bg-rose-50 hover:bg-rose-100 px-2 py-1 text-[11px] font-bold text-rose-700 cursor-pointer"
+                                  title="বরাদ্দ ও ডিও লিংক মুক্ত করুন"
+                                >
+                                  <Unlock className="h-3 w-3" />
+                                  <span>মুক্ত</span>
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
 
             {pendingGroups.length === 0 ? (
               <div className="border border-slate-200 rounded-xl py-8 text-center text-xs text-slate-500">
@@ -886,7 +1138,7 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
                                       <span>{p.recipientName}</span>
                                       {resolveItemGrain(p.category, p.ministryMemo) === 'কার্নেল' && (
                                         <span className="inline-flex items-center rounded-full border border-emerald-300 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-bold text-emerald-900">
-                                          কার্নেল
+                                          কার্নেল · মিলার
                                         </span>
                                       )}
                                     </div>
@@ -909,74 +1161,212 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
                                     <button
                                       type="button"
                                       onClick={() => setVerifyTargetKey(showVerify ? null : p.key)}
-                                      className={`min-h-[34px] rounded-lg border px-2.5 py-1 text-[11px] font-bold cursor-pointer whitespace-nowrap ${
+                                      className={`min-h-[34px] rounded-lg border px-2.5 py-1 text-[11px] font-bold cursor-pointer whitespace-nowrap inline-flex items-center gap-1 ${
                                         check.ok
                                           ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
                                           : 'border-amber-300 bg-amber-50 text-amber-800'
                                       }`}
                                     >
-                                      {check.ok ? 'চালান সঠিক' : 'যাচাই দেখুন'}
+                                      {check.ok && ((p.subId && check.mainChallan?.dealerAllocationId && normMemoNo(check.mainChallan.dealerAllocationId) === normMemoNo(p.subId)) || (p.subId && check.taxChallan?.dealerAllocationId && normMemoNo(check.taxChallan.dealerAllocationId) === normMemoNo(p.subId))) && (
+                                        <Lock className="h-3 w-3 shrink-0" />
+                                      )}
+                                      <span>{check.ok ? 'চালান সঠিক' : 'চালান সিগন্যাল'}</span>
                                     </button>
                                   )}
                                 </div>
 
                                 {/* DO No + Issue Date + Single Issue Button */}
-                                <div className="lg:col-span-4 grid grid-cols-12 gap-1.5 items-center pl-7 lg:pl-0">
-                                  <input
-                                    type="text"
-                                    list="unused-do-datalist"
-                                    value={rowDraft.doNo}
-                                    placeholder="ডিও নং"
-                                    onChange={(e) =>
-                                      setPendingInputs((prev) => ({
-                                        ...prev,
-                                        [p.key]: { ...rowDraft, doNo: e.target.value },
-                                      }))
-                                    }
-                                    className="col-span-5 min-h-[42px] w-full rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-sm font-bold text-center focus:outline-none focus:border-[#E2136E]"
-                                  />
-                                  <input
-                                    type="date"
-                                    value={rowDraft.date}
-                                    onChange={(e) =>
-                                      setPendingInputs((prev) => ({
-                                        ...prev,
-                                        [p.key]: { ...rowDraft, date: e.target.value },
-                                      }))
-                                    }
-                                    className="col-span-4 min-h-[42px] w-full rounded-lg border border-slate-300 bg-white px-1.5 py-1.5 text-[11px] sm:text-xs focus:outline-none focus:border-[#E2136E]"
-                                  />
-                                  <button
-                                    type="button"
-                                    disabled={!rowDraft.doNo.trim()}
-                                    onClick={() => handleIssueSingleRow(p)}
-                                    className="col-span-3 min-h-[42px] w-full rounded-lg bg-slate-900 hover:bg-slate-800 disabled:opacity-40 px-2 py-1.5 text-xs font-bold text-white cursor-pointer whitespace-nowrap"
-                                  >
-                                    ইস্যু
-                                  </button>
-                                </div>
+                                {(() => {
+                                  const draftKey = normDoNo(rowDraft.doNo);
+                                  const isAlreadyIssued = Boolean(draftKey && issuedSet.has(draftKey));
+                                  const isDupInPending = Boolean(
+                                    draftKey &&
+                                      Object.entries(pendingInputs).some(
+                                        ([k, v]) => k !== p.key && normDoNo(v?.doNo) === draftKey
+                                      )
+                                  );
+                                  const hasDoConflict = isAlreadyIssued || isDupInPending;
+                                  return (
+                                    <div className="lg:col-span-4 pl-7 lg:pl-0 space-y-1">
+                                      <div className="grid grid-cols-12 gap-1.5 items-center">
+                                        <input
+                                          type="text"
+                                          list="unused-do-datalist"
+                                          value={rowDraft.doNo}
+                                          placeholder="ডিও নং"
+                                          onChange={(e) =>
+                                            setPendingInputs((prev) => ({
+                                              ...prev,
+                                              [p.key]: { ...rowDraft, doNo: e.target.value },
+                                            }))
+                                          }
+                                          className={`col-span-5 min-h-[42px] w-full rounded-lg border px-2.5 py-1.5 text-sm font-bold text-center focus:outline-none ${
+                                            hasDoConflict
+                                              ? 'border-rose-500 bg-rose-50 text-rose-800 focus:border-rose-600'
+                                              : 'border-slate-300 bg-white focus:border-[#E2136E]'
+                                          }`}
+                                        />
+                                        <input
+                                          type="date"
+                                          value={rowDraft.date}
+                                          onChange={(e) =>
+                                            setPendingInputs((prev) => ({
+                                              ...prev,
+                                              [p.key]: { ...rowDraft, date: e.target.value },
+                                            }))
+                                          }
+                                          className="col-span-4 min-h-[42px] w-full rounded-lg border border-slate-300 bg-white px-1.5 py-1.5 text-[11px] sm:text-xs focus:outline-none focus:border-[#E2136E]"
+                                        />
+                                        <button
+                                          type="button"
+                                          disabled={!rowDraft.doNo.trim() || hasDoConflict}
+                                          onClick={() => handleIssueSingleRow(p)}
+                                          className="col-span-3 min-h-[42px] w-full rounded-lg bg-slate-900 hover:bg-slate-800 disabled:opacity-40 px-2 py-1.5 text-xs font-bold text-white cursor-pointer whitespace-nowrap"
+                                        >
+                                          ইস্যু
+                                        </button>
+                                      </div>
+                                      {hasDoConflict && (
+                                        <div className="text-[11px] font-bold text-rose-700">
+                                          {isAlreadyIssued
+                                            ? `ডিও নং ${toBnDigits(rowDraft.doNo)} আগেই ইস্যু হয়েছে — ব্যবহার করা যাবে না`
+                                            : `ডিও নং ${toBnDigits(rowDraft.doNo)} অন্য সারিতে লেখা আছে`}
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })()}
                               </div>
 
-                              {showVerify && check.applicable && (
-                                <div className="mt-2.5 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs">
-                                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
-                                    <span>
-                                      প্রয়োজনীয় মূল টাকা: <strong>{formatBnMoney(check.requiredAmount || 0)} ৳</strong>{' '}
-                                      ({check.mainChallan ? `জমা: ${formatBnMoney(check.mainChallan.depositedAmount)} ৳` : 'চালান নেই'})
-                                    </span>
-                                    <span>
-                                      প্রয়োজনীয় আয়কর: <strong>{formatBnMoney(check.requiredTaxAmount || 0)} ৳</strong>{' '}
-                                      ({check.taxChallan ? `জমা: ${formatBnMoney(check.taxChallan.depositedAmount)} ৳` : 'চালান নেই'})
-                                    </span>
-                                    {check.errors && check.errors.length > 0 && (
-                                      <span className="inline-flex items-center gap-1 font-bold text-rose-700">
-                                        <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-                                        {check.errors.join(' · ')}
-                                      </span>
-                                    )}
-                                  </div>
+                              {isChecked && check.applicable && !check.ok && check.errors && check.errors.length > 0 && !showVerify && (
+                                <div className="mt-2 px-3 py-1.5 bg-amber-50 border border-amber-200 rounded-lg text-[11px] font-bold text-amber-900 flex items-center gap-1.5">
+                                  <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-600" />
+                                  <span>সিগন্যাল: {check.errors.join(' · ')} (ডিও সেভ করা যাবে)</span>
                                 </div>
                               )}
+
+                              {showVerify && check.applicable && (() => {
+                                const mainLockedToSub = Boolean(
+                                  p.subId &&
+                                    check.mainChallan?.dealerAllocationId &&
+                                    normMemoNo(check.mainChallan.dealerAllocationId) === normMemoNo(p.subId)
+                                );
+                                const taxLockedToSub = Boolean(
+                                  p.subId &&
+                                    check.taxChallan?.dealerAllocationId &&
+                                    normMemoNo(check.taxChallan.dealerAllocationId) === normMemoNo(p.subId)
+                                );
+                                const partyChallans = db.challans
+                                  .filter(
+                                    (c) =>
+                                      c.category === p.category &&
+                                      ((p.subId && c.dealerAllocationId && normMemoNo(c.dealerAllocationId) === normMemoNo(p.subId)) ||
+                                        (c.dealerName && isSamePartyName(c.dealerName, p.recipientName)))
+                                  )
+                                  .sort((a, b) => (b.challanDate || '').localeCompare(a.challanDate || ''));
+                                const selectedManualChallanId = manualRelinkPickByRow[p.key] || '';
+
+                                return (
+                                  <div className="mt-2.5 px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-lg text-xs space-y-2">
+                                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+                                      <span className="inline-flex flex-wrap items-center gap-1">
+                                        প্রয়োজনীয় মূল টাকা: <strong>{formatBnMoney(check.requiredAmount || 0)} ৳</strong>{' '}
+                                        ({check.mainChallan ? `জমা: ${formatBnMoney(check.mainChallan.depositedAmount)} ৳ · ${toBnDigits(check.mainChallan.challanNo)}` : 'চালান নেই'})
+                                        {mainLockedToSub && (
+                                          <span className="inline-flex items-center gap-0.5 rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-bold text-emerald-800">
+                                            <Lock className="h-2.5 w-2.5" /> বরাদ্দে লক
+                                          </span>
+                                        )}
+                                      </span>
+                                      <span className="inline-flex flex-wrap items-center gap-1">
+                                        প্রয়োজনীয় আয়কর: <strong>{formatBnMoney(check.requiredTaxAmount || 0)} ৳</strong>{' '}
+                                        ({check.taxChallan ? `জমা: ${formatBnMoney(check.taxChallan.depositedAmount)} ৳ · ${toBnDigits(check.taxChallan.challanNo)}` : 'চালান নেই'})
+                                        {taxLockedToSub && (
+                                          <span className="inline-flex items-center gap-0.5 rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-bold text-emerald-800">
+                                            <Lock className="h-2.5 w-2.5" /> বরাদ্দে লক
+                                          </span>
+                                        )}
+                                      </span>
+                                      {check.errors && check.errors.length > 0 && (
+                                        <span className="inline-flex items-center gap-1 font-bold text-amber-800">
+                                          <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-600" />
+                                          {check.errors.join(' · ')}
+                                        </span>
+                                      )}
+                                    </div>
+
+                                    {onRelinkChallan && p.subId && partyChallans.length > 0 && (
+                                      <div className="pt-2 border-t border-slate-200 flex flex-wrap items-center gap-1.5 text-[11px]">
+                                        <span className="font-bold text-slate-700">ম্যানুয়াল লিংক পরিবর্তন:</span>
+                                        <select
+                                          value={selectedManualChallanId}
+                                          onChange={(e) =>
+                                            setManualRelinkPickByRow((prev) => ({
+                                              ...prev,
+                                              [p.key]: e.target.value,
+                                            }))
+                                          }
+                                          className="min-h-[32px] max-w-[300px] rounded-lg border border-slate-300 bg-white px-2 py-1"
+                                        >
+                                          <option value="">— চালান বেছে নিন —</option>
+                                          {partyChallans.map((c) => {
+                                            const lockState = c.dealerAllocationId
+                                              ? normMemoNo(c.dealerAllocationId) === normMemoNo(p.subId)
+                                                ? 'এই বরাদ্দে লক'
+                                                : 'অন্য বরাদ্দে লক'
+                                              : 'উন্মুক্ত';
+                                            return (
+                                              <option key={c.id} value={c.id}>
+                                                {c.challanType} · {toBnDigits(c.challanNo)} ({c.challanDate ? formatBnDate(c.challanDate) : '—'}) · {formatBnMoney(c.depositedAmount)} ৳ [{lockState}]
+                                              </option>
+                                            );
+                                          })}
+                                        </select>
+                                        <button
+                                          type="button"
+                                          disabled={!selectedManualChallanId}
+                                          onClick={() => {
+                                            const res = onRelinkChallan(selectedManualChallanId, {
+                                              dealerAllocationId: p.subId,
+                                            });
+                                            showRes(res);
+                                          }}
+                                          className="min-h-[32px] inline-flex items-center gap-1 rounded-lg bg-slate-900 hover:bg-slate-800 disabled:opacity-40 px-2.5 py-1 font-bold text-white cursor-pointer"
+                                        >
+                                          <Lock className="h-3 w-3" />
+                                          <span>এই বরাদ্দে লক করুন</span>
+                                        </button>
+                                        {mainLockedToSub && check.mainChallan && (
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              const res = onRelinkChallan(check.mainChallan!.id, { clearLink: true });
+                                              showRes(res);
+                                            }}
+                                            className="min-h-[32px] inline-flex items-center gap-1 rounded-lg border border-rose-300 bg-rose-50 hover:bg-rose-100 px-2 py-1 font-bold text-rose-700 cursor-pointer"
+                                          >
+                                            <Unlock className="h-3 w-3" />
+                                            <span>মূল মুক্ত</span>
+                                          </button>
+                                        )}
+                                        {taxLockedToSub && check.taxChallan && (
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              const res = onRelinkChallan(check.taxChallan!.id, { clearLink: true });
+                                              showRes(res);
+                                            }}
+                                            className="min-h-[32px] inline-flex items-center gap-1 rounded-lg border border-rose-300 bg-rose-50 hover:bg-rose-100 px-2 py-1 font-bold text-rose-700 cursor-pointer"
+                                          >
+                                            <Unlock className="h-3 w-3" />
+                                            <span>আয়কর মুক্ত</span>
+                                          </button>
+                                        )}
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })()}
                             </div>
                           );
                         })}
@@ -986,7 +1376,7 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
                 })}
 
                 <datalist id="unused-do-datalist">
-                  {sortedUnusedList.slice(0, 120).map((u) => (
+                  {availableDatalistDos.slice(0, 120).map((u) => (
                     <option key={u.doNo} value={String(u.doNo)}>
                       বই {toBnDigits(u.bookNo)}
                     </option>
@@ -1029,10 +1419,18 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
               ) : (
                 filteredIssuedDos.map((d) => {
                   const isEditing = editingDoRow?.id === d.id;
-                  const validForDo = (c: ChallanRecord): boolean =>
-                    c.category === d.category &&
-                    isSamePartyName(c.dealerName, d.recipientName) &&
-                    isChallanOnOrBeforeDo(c.challanDate, d.issueDate, false);
+                  const validForDo = (c: ChallanRecord): boolean => {
+                    if (c.category !== d.category) return false;
+                    if (!isChallanOnOrBeforeDo(c.challanDate, d.issueDate, false)) return false;
+                    if (c.dealerName && c.dealerName !== '—') {
+                      return isSamePartyName(c.dealerName, d.recipientName);
+                    }
+                    return Boolean(
+                      d.dealerAllocationId &&
+                        c.dealerAllocationId &&
+                        normMemoNo(c.dealerAllocationId) === normMemoNo(d.dealerAllocationId)
+                    );
+                  };
                   const mainRec = d.challanNo
                     ? db.challans.find(
                         (c) =>
@@ -1044,7 +1442,7 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
                         (c) =>
                           c.challanType === 'মূল চালান' &&
                           c.doNo &&
-                          normMemoNo(c.doNo) === normMemoNo(d.doNo) &&
+                          normDoNo(c.doNo) === normDoNo(d.doNo) &&
                           validForDo(c)
                       );
                   const taxRec = d.taxChallanNo
@@ -1058,7 +1456,7 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
                         (c) =>
                           c.challanType === 'আয়কর চালান' &&
                           c.doNo &&
-                          normMemoNo(c.doNo) === normMemoNo(d.doNo) &&
+                          normDoNo(c.doNo) === normDoNo(d.doNo) &&
                           validForDo(c)
                       );
                   const mainNo =
@@ -1141,7 +1539,7 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
                           <span>{d.category}</span>
                           {resolveItemGrain(d.category, d.ministryMemo) === 'কার্নেল' && (
                             <span className="inline-flex items-center rounded-full border border-emerald-300 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-bold text-emerald-900">
-                              কার্নেল
+                              কার্নেল · মিলার
                             </span>
                           )}
                         </div>
@@ -1172,7 +1570,7 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
                         </div>
 
                         {/* Challans */}
-                        <div className="lg:col-span-3 text-[11px] text-slate-700 space-y-0.5 break-words">
+                        <div className="lg:col-span-3 text-[11px] text-slate-700 space-y-1 break-words">
                           {!mainNo && !taxNo && mainAmt <= 0 && taxAmt <= 0 ? (
                             <span className="text-slate-400">চালান: —</span>
                           ) : (
@@ -1199,6 +1597,45 @@ export const DOWorkspaceView: React.FC<DOWorkspaceViewProps> = ({
                               )}
                             </>
                           )}
+                          {isEditing && onRelinkChallan && (() => {
+                            const eligibleChallans = db.challans.filter(
+                              (c) =>
+                                c.category === d.category &&
+                                (!c.dealerName || c.dealerName === '—' || isSamePartyName(c.dealerName, d.recipientName))
+                            );
+                            if (eligibleChallans.length === 0) return null;
+                            return (
+                              <div className="pt-1 flex flex-wrap items-center gap-1">
+                                <select
+                                  value={editingDoChallanId}
+                                  onChange={(e) => setEditingDoChallanId(e.target.value)}
+                                  className="min-h-[30px] max-w-[190px] rounded border border-slate-300 bg-white px-1.5 py-0.5 text-[10.5px]"
+                                >
+                                  <option value="">— চালান লিংক করুন —</option>
+                                  {eligibleChallans.map((c) => (
+                                    <option key={c.id} value={c.id}>
+                                      {c.challanType} · {toBnDigits(c.challanNo)} ({formatBnMoney(c.depositedAmount)} ৳)
+                                    </option>
+                                  ))}
+                                </select>
+                                <button
+                                  type="button"
+                                  disabled={!editingDoChallanId}
+                                  onClick={() => {
+                                    const res = onRelinkChallan(editingDoChallanId, {
+                                      dealerAllocationId: d.dealerAllocationId,
+                                      doNo: d.doNo,
+                                    });
+                                    showRes(res);
+                                    if (res.ok) setEditingDoChallanId('');
+                                  }}
+                                  className="min-h-[30px] rounded bg-slate-900 hover:bg-slate-800 disabled:opacity-40 px-2 py-0.5 text-[10.5px] font-bold text-white cursor-pointer"
+                                >
+                                  যুক্ত
+                                </button>
+                              </div>
+                            );
+                          })()}
                         </div>
 
                         {/* Actions */}

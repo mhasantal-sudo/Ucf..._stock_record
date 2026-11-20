@@ -14,13 +14,15 @@ import {
   type FireServiceEntry,
   type FoodDealer,
   type GrainType,
+  type MillerEntry,
+  type MillerRecipientRole,
   type MinistryAllocation,
   type OMSDealer,
   type ProjectEntry,
   type UNOSuballocation,
 } from '../types/allocation';
 import type { DriveSpreadsheetFile } from '../types/grain';
-import { bnToEnDigits, fiscalYearLabel, isChallanOnOrBeforeDo, isSamePartyName, memosLikelyMatch, namesFuzzyMatch, namesLikelyMatch, normChallanNo, normMemoNo, normPersonName, parseMonthYear, parseNum, round2, round3, toBnDigits, toIsoDateStr, uid } from './bnUtils';
+import { bnToEnDigits, fiscalYearLabel, isChallanOnOrBeforeDo, isFireServiceLabel, isSamePartyName, memosLikelyMatch, namesFuzzyMatch, namesLikelyMatch, normChallanNo, normDoNo, normMemoNo, normPersonName, parseMonthYear, parseNum, round2, round3, toBnDigits, toIsoDateStr, uid } from './bnUtils';
 import { callAndroidNativeHttp, callGasAction } from './gasBridge';
 import {
   GoogleAuthExpiredError,
@@ -102,7 +104,7 @@ export const ALLOC_SHEET_TABS = {
       'ইউসিএফ_উপবরাদ্দ',
       'উপবরাদ্দ',
     ],
-    headers: ['category', 'sourceMemo', 'unoMemo', 'date', 'dealerName', 'unionName', 'salesCenter', 'cardCount', 'unusedCards', 'allocationQty', 'totalAmount', 'taxAmount', 'createdAt', 'id'],
+    headers: ['category', 'sourceMemo', 'unoMemo', 'date', 'dealerName', 'unionName', 'salesCenter', 'cardCount', 'unusedCards', 'allocationQty', 'totalAmount', 'taxAmount', 'createdAt', 'id', 'openingStock'],
   },
   grProjects: {
     name: 'GR_Project',
@@ -189,12 +191,12 @@ export const ALLOC_SHEET_TABS = {
   foodDealers: {
     name: 'Food_Dealer',
     aliases: ['food_dealer', 'fooddealer', 'dealer_food', 'food_dealers', 'dealers_food', 'খাদ্য_বান্ধব_ডিলার', 'খাদ্যবান্ধব_ডিলার'],
-    headers: ['id', 'dealerName', 'fatherName', 'nid', 'mobile', 'unionName', 'salesCenter', 'cardCount', 'totalQty', 'poNo', 'poDate', 'bankName', 'amount', 'supervisorName', 'supervisorDesignation', 'supervisorMobile'],
+    headers: ['id', 'dealerName', 'fatherName', 'nid', 'mobile', 'unionName', 'salesCenter', 'cardCount', 'totalQty', 'poNo', 'poDate', 'bankName', 'amount', 'supervisorName', 'supervisorDesignation', 'supervisorMobile', 'tcbCardCount'],
   },
   omsDealers: {
     name: 'OMS_Dealer',
     aliases: ['oms_dealer', 'omsdealer', 'dealer_oms', 'oms_dealers', 'dealers_oms', 'ওএমএস_ডিলার'],
-    headers: ['id', 'dealerName', 'fatherName', 'nid', 'mobile', 'areaType', 'unionName', 'municipality', 'salesCenter', 'poNo', 'poDate', 'bankName', 'amount', 'supervisorName', 'supervisorDesignation', 'supervisorMobile'],
+    headers: ['id', 'dealerName', 'fatherName', 'nid', 'mobile', 'areaType', 'unionName', 'municipality', 'salesCenter', 'poNo', 'poDate', 'bankName', 'amount', 'supervisorName', 'supervisorDesignation', 'supervisorMobile', 'tcbCardCount'],
   },
   chairmen: {
     name: 'Chairman',
@@ -205,6 +207,11 @@ export const ALLOC_SHEET_TABS = {
     name: 'Fire_Service',
     aliases: ['fire_service', 'fireservice', 'ep_office', 'fire_services', 'fireservices', 'ep_offices', 'ফায়ার_সার্ভিস'],
     headers: ['id', 'officeName', 'divisionName', 'riceRate', 'wheatRate'],
+  },
+  millers: {
+    name: 'Miller',
+    aliases: ['miller', 'millers', 'rice_mill', 'ricemill', 'mill', 'mills', 'মিলার', 'মিলার_তালিকা', 'মিল_তালিকা', 'রাইস_মিল'],
+    headers: ['id', 'millerName', 'millName', 'ownerName', 'representativeName', 'recipientRole', 'mobile', 'unionName', 'address', 'licenseNo', 'note'],
   },
   rates: {
     name: 'Category_Rate',
@@ -238,45 +245,219 @@ function normColKey(s: unknown): string {
     .replace(/[\s_.\-/():]+/g, '');
 }
 
-/**
- * Detect whether a sheet table predominantly uses US M/D/YYYY dates (e.g. 7/19/2026, 8/27/2026)
- * vs D/M/YYYY dates. Returns true if MDY markers appear strictly without DMY markers.
- */
-function detectPreferMdy(rows: unknown[][]): boolean {
-  let mdyHits = 0;
-  let dmyHits = 0;
-  const maxRows = Math.min(rows.length, 250);
-  for (let i = 1; i < maxRows; i++) {
-    const r = rows[i] || [];
-    for (const cell of r) {
-      if (typeof cell !== 'string') continue;
-      const s = bnToEnDigits(cell).trim();
-      const slash = s.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})/);
-      if (!slash) continue;
-      const a = Number(slash[1]);
-      const b = Number(slash[2]);
-      if (b > 12 && a >= 1 && a <= 12) mdyHits += 1;
-      else if (a > 12 && b >= 1 && b <= 12) dmyHits += 1;
-    }
-  }
-  return mdyHits > dmyHits;
+interface DateOrderPref {
+  dashPreferMdy: boolean;
+  slashPreferMdy: boolean;
+  overallPreferMdy: boolean;
 }
 
-function parseDateStr(val: unknown, preferMdy = false): string {
+interface TableDateProfile {
+  tablePref: DateOrderPref;
+  colPrefByIdx: Map<number, DateOrderPref>;
+  colPrefByNormHeader: Map<string, DateOrderPref>;
+}
+
+const DATE_COL_NORM_KEYS = new Set(
+  [
+    'date',
+    'memodate',
+    'orderdate',
+    'entrydate',
+    'dcdate',
+    'dcmemodate',
+    'unodate',
+    'ucfdate',
+    'subdate',
+    'issuedate',
+    'dodate',
+    'challandate',
+    'mainchallandate',
+    'taxchallandate',
+    'incometaxdate',
+    'incometaxchallandate',
+    'podate',
+    'তারিখ',
+    'স্মারকতারিখ',
+    'স্মারকেরতারিখ',
+    'ডিসিতারিখ',
+    'ডিসিতারিক',
+    'উপবরাদ্দতারিখ',
+    'ইস্যুতারিখ',
+    'ডিওতারিখ',
+    'চালানেরতারিখ',
+    'জমারতারিখ',
+    'আয়করতারিখ',
+    'আয়করচালানেরতারিখ',
+    'পেঅর্ডারতারিখ',
+  ].map((k) => normColKey(k))
+);
+
+function isDateColumnHeader(header: unknown): boolean {
+  const nh = normColKey(header);
+  if (!nh) return false;
+  if (nh === 'createdat' || nh === 'updatedat' || nh === 'timestamp' || nh === 'created') return false;
+  return DATE_COL_NORM_KEYS.has(nh);
+}
+
+function isUsSpreadsheetLocale(locale?: string): boolean {
+  const clean = String(locale || '').trim();
+  return /^(?:en_US|en_AS|en_GU|en_MH|en_MP|en_PR|en_UM|en_VI|es_US)$/i.test(clean);
+}
+
+function toDateOrderPref(pref?: boolean | DateOrderPref): DateOrderPref {
+  if (typeof pref === 'object' && pref !== null) return pref;
+  const b = Boolean(pref);
+  return { dashPreferMdy: b, slashPreferMdy: b, overallPreferMdy: b };
+}
+
+function detectDateOrderFromCells(
+  cells: unknown[],
+  fallback: boolean | DateOrderPref = false,
+  inheritSeparatorFromOverall = false
+): DateOrderPref {
+  const base = toDateOrderPref(fallback);
+  let dashMdy = 0;
+  let dashDmy = 0;
+  let slashMdy = 0;
+  let slashDmy = 0;
+  for (const cell of cells) {
+    if (typeof cell !== 'string') continue;
+    const s = bnToEnDigits(cell).trim();
+    const m = s.match(/^(\d{1,2})([/-])(\d{1,2})\2(\d{4})(?:$|[^\d])/);
+    if (!m) continue;
+    const a = Number(m[1]);
+    const sep = m[2];
+    const b = Number(m[3]);
+    if (b > 12 && a >= 1 && a <= 12) {
+      if (sep === '-') dashMdy += 1;
+      else slashMdy += 1;
+    } else if (a > 12 && b >= 1 && b <= 12) {
+      if (sep === '-') dashDmy += 1;
+      else slashDmy += 1;
+    }
+  }
+  const totalMdy = dashMdy + slashMdy;
+  const totalDmy = dashDmy + slashDmy;
+  const overallPreferMdy = totalMdy !== totalDmy ? totalMdy > totalDmy : base.overallPreferMdy;
+  const dashPreferMdy =
+    dashMdy !== dashDmy
+      ? dashMdy > dashDmy
+      : inheritSeparatorFromOverall && totalMdy !== totalDmy
+        ? overallPreferMdy
+        : base.dashPreferMdy;
+  const slashPreferMdy =
+    slashMdy !== slashDmy
+      ? slashMdy > slashDmy
+      : inheritSeparatorFromOverall && totalMdy !== totalDmy
+        ? overallPreferMdy
+        : base.slashPreferMdy;
+  return { dashPreferMdy, slashPreferMdy, overallPreferMdy };
+}
+
+/**
+ * Detect whether a sheet table predominantly uses US M/D/YYYY dates (e.g. 7/19/2026, 8/27/2026)
+ * vs D/M/YYYY dates. Returns true if MDY markers appear strictly more than DMY markers.
+ */
+function detectPreferMdy(rows: unknown[][], defaultPreferMdy = false): boolean {
+  const maxRows = Math.min(rows.length, 400);
+  const cells: unknown[] = [];
+  for (let i = 1; i < maxRows; i++) {
+    const r = rows[i] || [];
+    for (const cell of r) cells.push(cell);
+  }
+  return detectDateOrderFromCells(cells, defaultPreferMdy, true).overallPreferMdy;
+}
+
+function detectTableDateProfile(
+  rows: unknown[][],
+  fallback: boolean | DateOrderPref = false
+): TableDateProfile {
+  if (!rows || rows.length < 2) {
+    return {
+      tablePref: toDateOrderPref(fallback),
+      colPrefByIdx: new Map(),
+      colPrefByNormHeader: new Map(),
+    };
+  }
+  const headerIdx = findHeaderRowIndex(rows);
+  const maxRows = Math.min(rows.length, 500);
+  const allCells: unknown[] = [];
+  for (let i = headerIdx + 1; i < maxRows; i++) {
+    const r = rows[i] || [];
+    for (const c of r) allCells.push(c);
+  }
+  const tablePref = detectDateOrderFromCells(allCells, fallback, true);
+  const colPrefByIdx = new Map<number, DateOrderPref>();
+  const colPrefByNormHeader = new Map<string, DateOrderPref>();
+  const rawHeaders = rows[headerIdx] || [];
+  for (let cIdx = 0; cIdx < rawHeaders.length; cIdx++) {
+    const colCells: unknown[] = [];
+    for (let rIdx = headerIdx + 1; rIdx < maxRows; rIdx++) {
+      const val = rows[rIdx]?.[cIdx];
+      if (typeof val === 'string' && val.trim() !== '') colCells.push(val);
+    }
+    const colPref = colCells.length > 0 ? detectDateOrderFromCells(colCells, tablePref) : tablePref;
+    colPrefByIdx.set(cIdx, colPref);
+    const nk = normKey(rawHeaders[cIdx]);
+    if (nk && !colPrefByNormHeader.has(nk)) {
+      colPrefByNormHeader.set(nk, colPref);
+    }
+  }
+  return { tablePref, colPrefByIdx, colPrefByNormHeader };
+}
+
+function resolveColDatePref(profile: TableDateProfile, candidateHeaders: string[]): DateOrderPref {
+  for (const h of candidateHeaders) {
+    const nk = normKey(h);
+    const hit = nk ? profile.colPrefByNormHeader.get(nk) : undefined;
+    if (hit) return hit;
+  }
+  return profile.tablePref;
+}
+
+function parseDateStr(val: unknown, preferMdy: boolean | DateOrderPref = false): string {
   if (val === null || val === undefined || val === '') return '';
-  if (typeof val === 'number' && val > 20000 && val < 80000) {
-    const ms = Math.round((val - 25569) * 86400 * 1000);
+  const decodeExcelSerial = (serial: number): string => {
+    const wholeDays = Math.floor(serial + 1e-4);
+    const ms = (wholeDays - 25569) * 86400 * 1000;
     const d = new Date(ms);
-    if (!Number.isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+    if (!Number.isNaN(d.getTime())) {
+      const y = d.getUTCFullYear();
+      const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+      const day = String(d.getUTCDate()).padStart(2, '0');
+      return `${y}-${m}-${day}`;
+    }
+    return '';
+  };
+  if (typeof val === 'number' && val > 20000 && val < 80000) {
+    const decoded = decodeExcelSerial(val);
+    if (decoded) return decoded;
   }
   const s = bnToEnDigits(String(val)).trim();
   if (!s) return '';
-  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
-  const slash = s.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})/);
+  if (/^\d{5}(?:\.\d+)?$/.test(s)) {
+    const serial = Number(s);
+    if (Number.isFinite(serial) && serial > 20000 && serial < 80000) {
+      const decoded = decodeExcelSerial(serial);
+      if (decoded) return decoded;
+    }
+  }
+  const mIso = s.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:$|[^\d])/);
+  if (mIso) {
+    const mon = Number(mIso[2]);
+    const day = Number(mIso[3]);
+    if (mon >= 1 && mon <= 12 && day >= 1 && day <= 31) {
+      return `${mIso[1]}-${String(mon).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    }
+  }
+  const slash = s.match(/^(\d{1,2})([/-])(\d{1,2})\2(\d{4})(?:$|[^\d])/);
   if (slash) {
+    const pref = toDateOrderPref(preferMdy);
     const a = Number(slash[1]);
-    const b = Number(slash[2]);
-    const y = slash[3];
+    const sep = slash[2];
+    const b = Number(slash[3]);
+    const y = slash[4];
+    const useMdy = sep === '-' ? pref.dashPreferMdy : pref.slashPreferMdy;
     let mon: number;
     let day: number;
     if (a > 12) {
@@ -285,17 +466,24 @@ function parseDateStr(val: unknown, preferMdy = false): string {
     } else if (b > 12) {
       mon = a;
       day = b;
-    } else if (preferMdy) {
+    } else if (useMdy) {
       mon = a;
       day = b;
     } else {
       day = a;
       mon = b;
     }
-    return `${y}-${String(mon).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    if (mon >= 1 && mon <= 12 && day >= 1 && day <= 31) {
+      return `${y}-${String(mon).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    }
   }
   const d = new Date(s);
-  if (!Number.isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+  if (!Number.isNaN(d.getTime())) {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  }
   return s;
 }
 
@@ -320,6 +508,7 @@ function normalizeCategoryName(raw: unknown, hintText?: string): AllocationCateg
     'কাবিখা বিশেষ চাল',
     'কাবিখা বিশেষ গম',
     'ভিডাব্লিউভি',
+    'কার্নেল',
   ];
   const hit = valid.find((v) => v === s || v.replace(/\s+/g, '') === compact);
   if (hit) return hit;
@@ -330,6 +519,13 @@ function normalizeCategoryName(raw: unknown, hintText?: string): AllocationCateg
     const low = n.toLowerCase();
     const cmp = low.replace(/\s+/g, '');
 
+    if (
+      n === 'কার্নেল' ||
+      cmp === 'kernel' ||
+      ((n.includes('কার্নেল') || low.includes('kernel')) && !n.includes('খাদ্য') && !n.includes('ভিডাব্লিউ'))
+    ) {
+      return 'কার্নেল';
+    }
     if ((n.includes('খাদ্য') && n.includes('বান্ধব')) || low.includes('food friendly') || cmp.includes('khadya')) {
       return 'খাদ্য বান্ধব';
     }
@@ -447,8 +643,22 @@ function mapRowsByHeader(rows: unknown[][]): Array<Record<string, unknown>> {
     if (!hasAny) continue;
     const obj: Record<string, unknown> = {};
     normHeaders.forEach((nh, idx) => {
-      if (nh) obj[nh] = r[idx];
-      if (rawHeaders[idx]) obj[rawHeaders[idx]] = r[idx];
+      const val = r[idx];
+      const strVal = val === null || val === undefined ? '' : String(val).trim();
+      if (nh) {
+        const listKey = `__list_${nh}`;
+        if (!Array.isArray(obj[listKey])) obj[listKey] = [];
+        if (strVal !== '') (obj[listKey] as string[]).push(strVal);
+        if (obj[nh] === undefined || obj[nh] === null || String(obj[nh]).trim() === '') {
+          obj[nh] = val;
+        }
+      }
+      const rh = rawHeaders[idx];
+      if (rh) {
+        if (obj[rh] === undefined || obj[rh] === null || String(obj[rh]).trim() === '') {
+          obj[rh] = val;
+        }
+      }
     });
     out.push(obj);
   }
@@ -577,7 +787,7 @@ function isIncompatiblePartialTab(tabKey: string | undefined, normTitle: string)
       normTitle.includes('উপবরাদ্দ')
     );
   }
-  if (tabKey === 'chairmen' || tabKey === 'fireServices' || tabKey === 'rates' || tabKey === 'settings') {
+  if (tabKey === 'chairmen' || tabKey === 'fireServices' || tabKey === 'millers' || tabKey === 'rates' || tabKey === 'settings') {
     return normTitle.includes('allocation') || normTitle.includes('uno') || normTitle.includes('dealer') || normTitle.includes('dobook') || normTitle.includes('doissue') || normTitle.includes('challan');
   }
   return false;
@@ -772,13 +982,15 @@ async function fetchPublicCsvSheet(
 function buildAllocationDbFromRawTables(
   tables: Partial<Record<AllocationRawTabKey, unknown[][]>>,
   matchedTabs: Set<AllocationRawTabKey>,
-  currentDb?: AllocationDatabase
+  currentDb?: AllocationDatabase,
+  localePreferMdy = false
 ): AllocationDatabase {
-  const workbookPreferMdy = Object.values(tables).some((t) => (t ? detectPreferMdy(t) : false));
+  const tablePreferMdy = Object.values(tables).some((t) => (t ? detectPreferMdy(t, localePreferMdy) : false));
+  const workbookPreferMdy = localePreferMdy || tablePreferMdy;
 
-  const mdyOf = (key: AllocationRawTabKey) => {
+  const profileOf = (key: AllocationRawTabKey): TableDateProfile => {
     const t = tables[key] || [];
-    return t.length > 1 ? detectPreferMdy(t) || workbookPreferMdy : workbookPreferMdy;
+    return detectTableDateProfile(t, workbookPreferMdy);
   };
 
   const ministryRows = mapRowsByHeader(tables.ministry || []);
@@ -794,6 +1006,7 @@ function buildAllocationDbFromRawTables(
   const omsDealerRows = mapRowsByHeader(tables.omsDealers || []);
   const chairmanRows = mapRowsByHeader(tables.chairmen || []);
   const fireRows = mapRowsByHeader(tables.fireServices || []);
+  const millerRows = mapRowsByHeader(tables.millers || []);
   const rateRows = mapRowsByHeader(tables.rates || []);
 
   const settingsMap: Record<string, string> = {};
@@ -805,7 +1018,9 @@ function buildAllocationDbFromRawTables(
 
   const seenIds = new Set<string>();
 
-  const minMdy = mdyOf('ministry');
+  const minProfile = profileOf('ministry');
+  const minMemoDateKeys = ['memodate', 'date', 'orderdate', 'entrydate', 'তারিখ', 'স্মারকতারিখ', 'স্মারকেরতারিখ', 'createdat'];
+  const minMemoDatePref = resolveColDatePref(minProfile, minMemoDateKeys);
   const ministryAllocations: MinistryAllocation[] = ministryRows
     .map((o, i) => {
       const memoNo = pickField(o, ['memono', 'memo', 'ministrymemo', 'স্মারক', 'স্মারকনং']);
@@ -814,7 +1029,7 @@ function buildAllocationDbFromRawTables(
         id: makeUniqueId(pickField(o, ['id']), 'min-s', i, seenIds),
         category: normalizeCategoryName(pickField(o, CATEGORY_FIELD_KEYS), `${memoNo} ${comment}`),
         memoNo,
-        memoDate: parseDateStr(pickField(o, ['memodate', 'date', 'তারিখ', 'স্মারকতারিখ', 'createdat']), minMdy),
+        memoDate: parseDateStr(pickField(o, ['memodate', 'date', 'তারিখ', 'স্মারকতারিখ', 'createdat']), minMemoDatePref),
         allocationQty: pickNum(o, ['allocationqty', 'qty', 'quantity', 'পরিমাণ', 'বরাদ্দ']),
         grain: normalizeGrainType(pickField(o, ['grain', 'শস্য', 'পণ্য']), 'চাল'),
         phase: pickNum(o, ['phase', 'পর্যায়']) || undefined,
@@ -824,7 +1039,8 @@ function buildAllocationDbFromRawTables(
     })
     .filter((x) => x.memoNo || x.allocationQty > 0);
 
-  const dcMdy = mdyOf('dc');
+  const dcProfile = profileOf('dc');
+  const dcDatePref = resolveColDatePref(dcProfile, ['dcdate', 'dcmemodate', 'memodate', 'date', 'orderdate', 'তারিখ', 'স্মারকতারিখ', 'ডিসিতারিক', 'ডিসিতারিখ', 'createdat']);
   const dcAllocations: DCAllocation[] = dcRows
     .map((o, i) => {
       const ministryMemo = pickField(o, ['ministrymemo', 'sourcememo', 'মন্ত্রণালয়স্মারক']);
@@ -834,14 +1050,15 @@ function buildAllocationDbFromRawTables(
         category: normalizeCategoryName(pickField(o, CATEGORY_FIELD_KEYS), `${ministryMemo} ${dcMemo}`),
         ministryMemo,
         dcMemo,
-        dcMemoDate: parseDateStr(pickField(o, ['dcdate', 'dcmemodate', 'date', 'তারিখ', 'createdat']), dcMdy),
+        dcMemoDate: parseDateStr(pickField(o, ['dcdate', 'dcmemodate', 'date', 'তারিখ', 'createdat']), dcDatePref),
         allocationQty: pickNum(o, ['allocationqty', 'qty', 'quantity', 'পরিমাণ', 'বরাদ্দ']),
         createdAt: pickField(o, ['createdat']) || new Date().toISOString(),
       };
     })
     .filter((x) => x.dcMemo || x.allocationQty > 0);
 
-  const subMdy = mdyOf('dealerSub');
+  const subProfile = profileOf('dealerSub');
+  const subDatePref = resolveColDatePref(subProfile, ['date', 'unodate', 'ucfdate', 'subdate', 'memodate', 'তারিখ', 'উপবরাদ্দতারিখ', 'createdat']);
   const dealerSuballocations: DealerSuballocation[] = dealerSubRows
     .map((o, i) => {
       const dealerName = pickField(o, ['dealername', 'recipientname', 'dealer', 'ডিলার', 'ডিলারেরনাম', 'প্রাপক']);
@@ -852,12 +1069,13 @@ function buildAllocationDbFromRawTables(
         category: normalizeCategoryName(pickField(o, CATEGORY_FIELD_KEYS), `${dealerName} ${sourceMemo} ${grainHint}`),
         sourceMemo,
         unoMemo: pickField(o, ['unomemo', 'ucfmemo', 'sourcememo', 'dcmemo', 'ইউসিএফস্মারক', 'উপবরাদ্দস্মারক']),
-        unoDate: parseDateStr(pickField(o, ['unodate', 'date', 'তারিখ', 'createdat']), subMdy),
+        unoDate: parseDateStr(pickField(o, ['unodate', 'date', 'তারিখ', 'createdat']), subDatePref),
         dealerName,
         unionName: pickField(o, ['unionname', 'municipality', 'area', 'union', 'ইউনিয়ন']),
         salesCenter: pickField(o, ['salescenter', 'center', 'বিক্রয়কেন্দ্র']),
         cardCount: pickNum(o, ['cardcount', 'cards', 'কার্ড', 'কার্ডসংখ্যা']),
         unusedCards: pickNum(o, ['unusedcards', 'অবিক্রিতকার্ড']),
+        openingStock: pickNum(o, ['openingstock', 'openingstockmt', 'প্রারম্ভিকমজুদ']) || undefined,
         allocationQty: pickNum(o, ['allocationqty', 'qty', 'quantity', 'পরিমাণ', 'উপবরাদ্দ']),
         totalAmount: pickNum(o, ['totalamount', 'amount', 'টাকা', 'মোটটাকা']),
         taxAmount: pickNum(o, ['taxamount', 'tax', 'আয়কর']),
@@ -932,7 +1150,8 @@ function buildAllocationDbFromRawTables(
     projects.push(p);
   }
 
-  const unoMdy = mdyOf('unoSub');
+  const unoProfile = profileOf('unoSub');
+  const unoDatePref = resolveColDatePref(unoProfile, ['unodate', 'date', 'subdate', 'memodate', 'তারিখ', 'উপবরাদ্দতারিখ', 'createdat']);
   const unoSuballocations: UNOSuballocation[] = unoSubRows
     .map((o, i) => {
       const recipientName = pickField(o, [
@@ -961,7 +1180,7 @@ function buildAllocationDbFromRawTables(
         ]),
         dcMemo: pickField(o, ['dcmemo', 'ডিসিস্মারক']),
         unoMemo: pickField(o, ['unomemo', 'ইউএনওস্মারক', 'স্মারক']),
-        unoDate: parseDateStr(pickField(o, ['unodate', 'date', 'তারিখ', 'createdat']), unoMdy),
+        unoDate: parseDateStr(pickField(o, ['unodate', 'date', 'তারিখ', 'createdat']), unoDatePref),
         unionName: pickField(o, ['unionname', 'ইউনিয়ন']),
         recipientName,
         projectNo: pickField(o, ['projectno', 'প্রকল্পনং', 'প্রনং', 'প্রকল্পনম্বর']),
@@ -987,7 +1206,10 @@ function buildAllocationDbFromRawTables(
     })
     .filter((x) => x.bookNo > 0 && x.endPage >= x.startPage);
 
-  const doMdy = mdyOf('doIssue');
+  const doProfile = profileOf('doIssue');
+  const doIssueDatePref = resolveColDatePref(doProfile, ['issuedate', 'dodate', 'date', 'createdat', 'তারিখ', 'ইস্যুতারিখ']);
+  const doChallanDatePref = resolveColDatePref(doProfile, ['challandate', 'mainchallandate', 'চালানেরতারিখ']);
+  const doTaxDatePref = resolveColDatePref(doProfile, ['taxchallandate', 'incometaxdate', 'আয়করতারিখ']);
   const doIssues: DOIssue[] = doIssueRows
     .map((o, i) => {
       const recipientName = pickField(o, ['recipientname', 'dealername', 'dealer', 'প্রাপক', 'ডিলার', 'প্রতিষ্ঠান']);
@@ -997,7 +1219,7 @@ function buildAllocationDbFromRawTables(
       return {
         id: makeUniqueId(pickField(o, ['id']), 'doi-s', i, seenIds),
         doNo: pickField(o, ['dono', 'donumber', 'do', 'ডিওনং', 'ডিওনম্বর', 'ডিও']),
-        issueDate: parseDateStr(pickField(o, ['issuedate', 'date', 'dodate', 'createdat', 'তারিখ', 'ইস্যুতারিখ']), doMdy),
+        issueDate: parseDateStr(pickField(o, ['issuedate', 'date', 'dodate', 'createdat', 'তারিখ', 'ইস্যুতারিখ']), doIssueDatePref),
         category: normalizeCategoryName(pickField(o, CATEGORY_FIELD_KEYS), `${recipientName} ${ministryMemo} ${grainHint}`),
         unionName: pickField(o, ['unionname', 'union', 'area', 'municipality', 'ইউনিয়ন', 'এলাকা']),
         recipientName,
@@ -1009,10 +1231,10 @@ function buildAllocationDbFromRawTables(
         projectNo: pickField(o, ['projectno', 'প্রকল্পনং']),
         dealerAllocationId,
         challanNo: pickField(o, ['challanno', 'mainchallanno', 'মূলচালান', 'মূলচালাননং', 'চালাননং']),
-        challanDate: parseDateStr(pickField(o, ['challandate', 'mainchallandate', 'চালানেরতারিখ']), doMdy),
+        challanDate: parseDateStr(pickField(o, ['challandate', 'mainchallandate', 'চালানেরতারিখ']), doChallanDatePref),
         challanAmount: pickNum(o, ['challanamount', 'mainchallanamount', 'depositedamount', 'amount', 'totalamount', 'মূলচালানেরটাকা', 'জমাকৃতটাকা', 'মোটটাকা', 'টাকা']) || undefined,
         taxChallanNo: pickField(o, ['taxchallanno', 'incometaxchallanno', 'আয়করচালান', 'আয়করচালাননং']),
-        taxChallanDate: parseDateStr(pickField(o, ['taxchallandate', 'incometaxdate', 'আয়করতারিখ']), doMdy),
+        taxChallanDate: parseDateStr(pickField(o, ['taxchallandate', 'incometaxdate', 'আয়করতারিখ']), doTaxDatePref),
         taxChallanAmount: pickNum(o, ['taxchallanamount', 'incometaxamount', 'taxamount', 'আয়করটাকা', 'আয়করেরপরিমাণ']) || undefined,
         requiredAmount: pickNum(o, ['requiredamount', 'recordedamount']) || undefined,
         requiredTaxAmount: pickNum(o, ['requiredtaxamount']) || undefined,
@@ -1035,7 +1257,8 @@ function buildAllocationDbFromRawTables(
     return out;
   };
 
-  const foodMdy = mdyOf('foodDealers');
+  const foodProfile = profileOf('foodDealers');
+  const foodPoDatePref = resolveColDatePref(foodProfile, ['podate', 'পেঅর্ডারতারিখ']);
   const foodDealers: FoodDealer[] = dedupByKey(
     foodDealerRows
       .map((o, i) => ({
@@ -1047,9 +1270,10 @@ function buildAllocationDbFromRawTables(
         unionName: pickField(o, ['unionname', 'union', 'ইউনিয়নেরনাম', 'ইউনিয়ন']),
         salesCenter: pickField(o, ['salescenter', 'center', 'বিক্রয়কেন্দ্র', 'কেন্দ্র']),
         cardCount: pickNum(o, ['cardcount', 'cards', 'কার্ড', 'কার্ডসংখ্যা']),
+        tcbCardCount: pickNum(o, ['tcbcardcount', 'tcbcards', 'টিসিবিকার্ড', 'টিসিপিকার্ড', 'টিসিবিকার্ডসংখ্যা']),
         totalQty: pickNum(o, ['totalqty', 'মোটপরিমাণ', 'পরিমাণ']) || Number((pickNum(o, ['cardcount', 'cards', 'কার্ড', 'কার্ডসংখ্যা']) * 0.03).toFixed(3)),
         poNo: pickField(o, ['pono', 'পেঅর্ডারনং']),
-        poDate: parseDateStr(pickField(o, ['podate', 'পেঅর্ডারতারিখ']), foodMdy),
+        poDate: parseDateStr(pickField(o, ['podate', 'পেঅর্ডারতারিখ']), foodPoDatePref),
         bankName: pickField(o, ['bankname', 'ব্যাংক', 'ব্যাংকেরনাম']),
         amount: pickNum(o, ['amount', 'টাকারপরিমাণ']),
         supervisorName: pickField(o, ['supervisorname', 'তদারকিকর্মকর্তা']),
@@ -1060,7 +1284,8 @@ function buildAllocationDbFromRawTables(
     (d) => `${normKey(d.dealerName)}::${normKey(d.unionName)}`
   );
 
-  const omsMdy = mdyOf('omsDealers');
+  const omsProfile = profileOf('omsDealers');
+  const omsPoDatePref = resolveColDatePref(omsProfile, ['podate', 'পেঅর্ডারতারিখ']);
   const omsDealers: OMSDealer[] = dedupByKey(
     omsDealerRows
       .map((o, i) => ({
@@ -1073,8 +1298,9 @@ function buildAllocationDbFromRawTables(
         unionName: pickField(o, ['unionname', 'union', 'ইউনিয়নেরনাম', 'ইউনিয়ন']),
         municipality: pickField(o, ['municipality', 'পৌরসভা']),
         salesCenter: pickField(o, ['salescenter', 'center', 'বিক্রয়কেন্দ্র', 'কেন্দ্র']),
+        tcbCardCount: pickNum(o, ['tcbcardcount', 'tcbcards', 'টিসিবিকার্ড', 'টিসিপিকার্ড', 'টিসিবিকার্ডসংখ্যা']),
         poNo: pickField(o, ['pono', 'পেঅর্ডারনং']),
-        poDate: parseDateStr(pickField(o, ['podate']), omsMdy),
+        poDate: parseDateStr(pickField(o, ['podate']), omsPoDatePref),
         bankName: pickField(o, ['bankname', 'ব্যাংক', 'ব্যাংকেরনাম']),
         amount: pickNum(o, ['amount', 'টাকারপরিমাণ']),
         supervisorName: pickField(o, ['supervisorname', 'তদারকিকর্মকর্তা']),
@@ -1110,6 +1336,33 @@ function buildAllocationDbFromRawTables(
       }))
       .filter((x) => x.officeName),
     (f) => normKey(f.officeName)
+  );
+
+  const normalizeMillerRole = (raw: string): MillerRecipientRole => {
+    const k = normKey(raw);
+    if (k === 'miller' || k === 'মিলার' || k === 'মিলারেরনাম') return 'miller';
+    if (k === 'owner' || k === 'মিলমালিক' || k === 'মালিক') return 'owner';
+    if (k === 'representative' || k === 'প্রতিনিধি' || k === 'প্রতিনিধিরনাম') return 'representative';
+    return 'mill';
+  };
+
+  const millers: MillerEntry[] = dedupByKey(
+    millerRows
+      .map((o, i) => ({
+        id: makeUniqueId(pickField(o, ['id']), 'ml-s', i, seenIds),
+        millerName: pickField(o, ['millername', 'miller', 'মিলারেরনাম', 'মিলার', 'নাম']),
+        millName: pickField(o, ['millname', 'mill', 'ricemill', 'মিলেরনাম', 'প্রতিষ্ঠান', 'রাইসমিল']),
+        ownerName: pickField(o, ['ownername', 'owner', 'মিলমালিক', 'মালিকেরনাম', 'মালিক']),
+        representativeName: pickField(o, ['representativename', 'representative', 'rep', 'প্রতিনিধি', 'প্রতিনিধিরনাম']),
+        recipientRole: normalizeMillerRole(pickField(o, ['recipientrole', 'role', 'প্রাপকধরন', 'ধরন'])),
+        mobile: pickField(o, ['mobile', 'phone', 'মোবাইল']),
+        unionName: pickField(o, ['unionname', 'union', 'ইউনিয়ন']),
+        address: pickField(o, ['address', 'ঠিকানা', 'স্থান']),
+        licenseNo: pickField(o, ['licenseno', 'license', 'লাইসেন্স']),
+        note: pickField(o, ['note', 'মন্তব্য']),
+      }))
+      .filter((m) => m.millerName || m.millName || m.ownerName || m.representativeName),
+    (m) => `${normKey(m.millName || m.millerName)}::${normKey(m.ownerName)}`
   );
 
   const rates: CategoryRate[] = dedupByKey(
@@ -1167,6 +1420,18 @@ function buildAllocationDbFromRawTables(
       // ignore
     }
   }
+  let allocOrderForms = currentDb?.allocOrderForms || {};
+  const rawAllocOrderForms = readChunkedSetting('allocOrderForms');
+  if (rawAllocOrderForms) {
+    try {
+      allocOrderForms = {
+        ...allocOrderForms,
+        ...(JSON.parse(rawAllocOrderForms) as AllocationDatabase['allocOrderForms']),
+      };
+    } catch {
+      // ignore
+    }
+  }
 
   const isRealAllocationSheet = matchedTabs.size >= 2;
   const resolveTab = <T>(key: keyof typeof ALLOC_SHEET_TABS, parsed: T[], fallback: T[], keepFallbackWhenMissing = false): T[] => {
@@ -1199,10 +1464,12 @@ function buildAllocationDbFromRawTables(
     omsDealers: resolveTab('omsDealers', omsDealers, currentDb?.omsDealers || [], true),
     chairmen: resolveTab('chairmen', chairmen, currentDb?.chairmen || [], true),
     fireServices: resolveTab('fireServices', fireServices, currentDb?.fireServices || [], true),
+    millers: resolveTab('millers', millers, currentDb?.millers || [], true),
     rates: resolveTab('rates', rates, currentDb?.rates || [], true),
     officer,
     templates,
     reportMemos,
+    allocOrderForms,
   };
 
   return reconcileChallansAndDOs(built);
@@ -1272,16 +1539,68 @@ export function reconcileChallansAndDOs(db: AllocationDatabase): AllocationDatab
     return { ...s, totalAmount, taxAmount };
   });
 
-  const subById = new Map<string, DealerSuballocation>();
+  const subById = new Map<string, { category: AllocationCategory; dealerName: string; sourceMemo: string; totalAmount: number; taxAmount: number; allocationQty: number }>();
   for (const s of enrichedSubs) {
     if (s.id) subById.set(s.id.trim(), s);
+  }
+  const unoById = new Map<string, { category: AllocationCategory; dealerName: string }>();
+  for (const u of db.unoSuballocations) {
+    if (u.id) unoById.set(u.id.trim(), { category: u.category, dealerName: u.recipientName });
   }
 
   const uniqueChallans = deduplicateChallanRecords(db.challans);
 
-  // Resolve consistent same-category & same-dealer suballocation metadata (never cross-category / cross-dealer)
-  const preNormalizedChallans: ChallanRecord[] = uniqueChallans.map((c) => {
-    const rawSub = c.dealerAllocationId ? subById.get(c.dealerAllocationId.trim()) : undefined;
+  // Pair split Main & -TAX challan records sharing the same base sourceRowId / CHL-* ID
+  const pairMetaByBaseId = new Map<
+    string,
+    { dealerName?: string; dealerAllocationId?: string; allocationQty?: number; challanDate?: string }
+  >();
+  const getChallanBasePairId = (c: ChallanRecord): string => {
+    const raw = (c.sourceRowId || (!c.id.startsWith('ch-ext-') && !c.id.startsWith('ch-rec-') && !c.id.startsWith('ch-paste-') ? c.id : '')).trim();
+    return raw ? raw.replace(/-(TAX|MAIN)$/i, '').trim() : '';
+  };
+  for (const c of uniqueChallans) {
+    const baseId = getChallanBasePairId(c);
+    if (!baseId) continue;
+    const cur = pairMetaByBaseId.get(baseId) || {};
+    if ((!cur.dealerName || cur.dealerName === '—') && c.dealerName && c.dealerName !== '—') {
+      cur.dealerName = c.dealerName;
+    }
+    if (!cur.dealerAllocationId && c.dealerAllocationId) {
+      cur.dealerAllocationId = c.dealerAllocationId;
+    }
+    if ((!cur.allocationQty || cur.allocationQty <= 0) && c.allocationQty && c.allocationQty > 0) {
+      cur.allocationQty = c.allocationQty;
+    }
+    if (!cur.challanDate && c.challanDate) {
+      cur.challanDate = c.challanDate;
+    }
+    pairMetaByBaseId.set(baseId, cur);
+  }
+
+  // Resolve consistent same-category & same-dealer suballocation metadata (NEVER clear a saved dealerAllocationId)
+  const preNormalizedChallans: ChallanRecord[] = uniqueChallans.map((rawC) => {
+    const baseId = getChallanBasePairId(rawC);
+    const pairMeta = baseId ? pairMetaByBaseId.get(baseId) : undefined;
+    const c: ChallanRecord = pairMeta
+      ? {
+          ...rawC,
+          sourceRowId: baseId,
+          dealerName:
+            rawC.dealerName && rawC.dealerName !== '—'
+              ? rawC.dealerName
+              : pairMeta.dealerName || rawC.dealerName,
+          dealerAllocationId: rawC.dealerAllocationId || pairMeta.dealerAllocationId,
+          allocationQty:
+            rawC.allocationQty && rawC.allocationQty > 0
+              ? rawC.allocationQty
+              : pairMeta.allocationQty,
+          challanDate: rawC.challanDate || pairMeta.challanDate || '',
+        }
+      : rawC;
+
+    const subKey = c.dealerAllocationId ? c.dealerAllocationId.trim() : '';
+    const rawSub = subKey ? subById.get(subKey) || unoById.get(subKey) : undefined;
     const validSub =
       rawSub &&
       (!c.category || rawSub.category === c.category) &&
@@ -1293,11 +1612,14 @@ export function reconcileChallansAndDOs(db: AllocationDatabase): AllocationDatab
       c.dealerName && c.dealerName !== '—'
         ? c.dealerName
         : validSub?.dealerName || c.dealerName || '';
-    const resolvedSubId = validSub ? c.dealerAllocationId : undefined;
+    const resolvedSubId = c.dealerAllocationId ? c.dealerAllocationId.trim() : undefined;
     if (
-      resolvedCat !== c.category ||
-      resolvedDealer !== c.dealerName ||
-      resolvedSubId !== c.dealerAllocationId
+      resolvedCat !== rawC.category ||
+      resolvedDealer !== rawC.dealerName ||
+      resolvedSubId !== rawC.dealerAllocationId ||
+      c.sourceRowId !== rawC.sourceRowId ||
+      c.allocationQty !== rawC.allocationQty ||
+      c.challanDate !== rawC.challanDate
     ) {
       return {
         ...c,
@@ -1306,7 +1628,7 @@ export function reconcileChallansAndDOs(db: AllocationDatabase): AllocationDatab
         dealerAllocationId: resolvedSubId,
       };
     }
-    return c;
+    return rawC;
   });
 
   const isKernelDo = (d: DOIssue): boolean => {
@@ -1330,34 +1652,149 @@ export function reconcileChallansAndDOs(db: AllocationDatabase): AllocationDatab
 
   const usedChallanIds = new Set<string>();
   const usedChallanNoType = new Set<string>();
+  const pinnedInlineNoType = new Set<string>();
   const matchedDoByChallanId = new Map<string, DOIssue>();
   const matchedMainByDoId = new Map<string, ChallanRecord>();
   const matchedMainSourceRowByDoId = new Map<string, string>();
   const matchedTaxByDoId = new Map<string, ChallanRecord>();
+  const pinnedMainDoIds = new Set<string>();
+  const pinnedTaxDoIds = new Set<string>();
+  const doNoExistsSet = new Set(db.doIssues.map((d) => normDoNo(d.doNo)).filter(Boolean));
 
-  // Strict 1-to-1 chronological matching:
-  // 1) Same category (never cross-category)
-  // 2) Same dealer / institution / person (never cross-dealer)
-  // 3) Challan date <= DO issue date
-  // 4) Earliest challan -> earliest DO; once used, never reused
+  const getChallanRowBaseId = (c: ChallanRecord): string =>
+    c.sourceRowId || (!c.id.startsWith('ch-ext-') && !c.id.startsWith('ch-rec-') ? c.id : '');
+
+  const isPartyCompatible = (c: ChallanRecord, d: DOIssue): boolean => {
+    if (c.category !== d.category) return false;
+    if (!d.recipientName) return false;
+    if (!c.dealerName || c.dealerName === '—') {
+      return Boolean(
+        d.dealerAllocationId &&
+          c.dealerAllocationId &&
+          normMemoNo(c.dealerAllocationId) === normMemoNo(d.dealerAllocationId)
+      );
+    }
+    return isSamePartyName(c.dealerName, d.recipientName);
+  };
+
+  const lockMatch = (type: 'মূল চালান' | 'আয়কর চালান', d: DOIssue, c: ChallanRecord) => {
+    usedChallanIds.add(c.id);
+    const k = normChallanNo(c.challanNo);
+    if (k) usedChallanNoType.add(`${k}::${type}`);
+    matchedDoByChallanId.set(c.id, d);
+    if (type === 'মূল চালান') {
+      matchedMainByDoId.set(d.id, c);
+      pinnedMainDoIds.add(d.id);
+      const srid = getChallanRowBaseId(c);
+      if (srid) matchedMainSourceRowByDoId.set(d.id, srid);
+    } else {
+      matchedTaxByDoId.set(d.id, c);
+      pinnedTaxDoIds.add(d.id);
+    }
+  };
+
+  // Pass 0A: LOCK already-saved explicit DO -> Challan bindings FIRST so editing/deleting
+  // any other DO, challan, or allocation NEVER reassigns or steals a saved DO's challan.
   for (const type of ['মূল চালান', 'আয়কর চালান'] as const) {
     for (const d of sortedDos) {
       if (isKernelDo(d)) continue;
-      const dIso = toIsoDateStr(d.issueDate);
       const targetDoChallanNo = type === 'মূল চালান' ? d.challanNo : d.taxChallanNo;
+      const targetNoNorm = normChallanNo(targetDoChallanNo);
+      if (!targetNoNorm) continue;
+
+      const dIso = toIsoDateStr(d.issueDate);
+      const pinned = preNormalizedChallans.find((c) => {
+        if (c.challanType !== type) return false;
+        if (usedChallanIds.has(c.id)) return false;
+        const cNoNorm = normChallanNo(c.challanNo);
+        if (!cNoNorm || cNoNorm !== targetNoNorm) return false;
+        if (usedChallanNoType.has(`${cNoNorm}::${type}`)) return false;
+        if (!isPartyCompatible(c, d)) return false;
+        const cIso = toIsoDateStr(c.challanDate);
+        if (cIso && dIso && cIso > dIso) return false;
+        return true;
+      });
+
+      if (pinned) {
+        lockMatch(type, d, pinned);
+      } else {
+        // Inline-only saved challan (or challan temporarily absent from challans list):
+        // still preserve the DO's pinned slot so Pass 1 does not overwrite it with another challan.
+        const savedDate = type === 'মূল চালান' ? d.challanDate : d.taxChallanDate;
+        if (isChallanOnOrBeforeDo(savedDate, d.issueDate, false)) {
+          pinnedInlineNoType.add(`${targetNoNorm}::${type}`);
+          if (type === 'মূল চালান') pinnedMainDoIds.add(d.id);
+          else pinnedTaxDoIds.add(d.id);
+        }
+      }
+    }
+  }
+
+  // Pass 0B: Honor explicit c.doNo written on Challan records for DOs that do not yet have a pinned challan
+  for (const type of ['মূল চালান', 'আয়কর চালান'] as const) {
+    for (const d of sortedDos) {
+      if (isKernelDo(d)) continue;
+      if (type === 'মূল চালান' && pinnedMainDoIds.has(d.id)) continue;
+      if (type === 'আয়কর চালান' && pinnedTaxDoIds.has(d.id)) continue;
+      const dDoNorm = normDoNo(d.doNo);
+      if (!dDoNorm) continue;
+      const dIso = toIsoDateStr(d.issueDate);
+
+      const byExplicitDo = preNormalizedChallans.find((c) => {
+        if (c.challanType !== type) return false;
+        if (usedChallanIds.has(c.id)) return false;
+        const chKey = normChallanNo(c.challanNo);
+        if (chKey && (usedChallanNoType.has(`${chKey}::${type}`) || pinnedInlineNoType.has(`${chKey}::${type}`))) return false;
+        if (!c.doNo || normDoNo(c.doNo) !== dDoNorm) return false;
+        if (!isPartyCompatible(c, d)) return false;
+        const cIso = toIsoDateStr(c.challanDate);
+        if (cIso && dIso && cIso > dIso) return false;
+        return true;
+      });
+      if (byExplicitDo) {
+        lockMatch(type, d, byExplicitDo);
+      }
+    }
+  }
+
+  // Pass 1: Heuristic 1-to-1 chronological matching ONLY for unlinked DOs with NO pinned challan:
+  // 1) Same category (never cross-category)
+  // 2) Same dealer / institution / person (never cross-dealer)
+  // 3) Challan date <= DO issue date
+  // 4) Never steal a challan pinned to or explicitly referencing another active DO
+  for (const type of ['মূল চালান', 'আয়কর চালান'] as const) {
+    for (const d of sortedDos) {
+      if (isKernelDo(d)) continue;
+      if (type === 'মূল চালান' && pinnedMainDoIds.has(d.id)) continue;
+      if (type === 'আয়কর চালান' && pinnedTaxDoIds.has(d.id)) continue;
+      const dIso = toIsoDateStr(d.issueDate);
+      const dDoNorm = normDoNo(d.doNo);
+      const dSubNorm = normMemoNo(d.dealerAllocationId);
       const pairedMainSourceRow = type === 'আয়কর চালান' ? matchedMainSourceRowByDoId.get(d.id) : undefined;
 
       const candidates = preNormalizedChallans.filter((c) => {
         if (c.challanType !== type) return false;
         if (usedChallanIds.has(c.id)) return false;
         const chKey = normChallanNo(c.challanNo);
-        if (chKey && usedChallanNoType.has(`${chKey}::${type}`)) return false;
+        if (chKey && (usedChallanNoType.has(`${chKey}::${type}`) || pinnedInlineNoType.has(`${chKey}::${type}`))) return false;
 
-        // Rule: Same category strictly
-        if (c.category !== d.category) return false;
+        // Do not claim a challan explicitly tagged to a DIFFERENT DO
+        const cDoNorm = normDoNo(c.doNo);
+        if (cDoNorm && (!dDoNorm || cDoNorm !== dDoNorm)) {
+          return false;
+        }
 
-        // Rule: Same dealer / institution / person strictly
+        // Strict Allocation Lock:
+        // A challan linked to a specific allocation (c.dealerAllocationId) is LOCKED there
+        // and MUST NEVER match any DO without the exact same dealerAllocationId.
+        const cSubNorm = normMemoNo(c.dealerAllocationId);
+        if (cSubNorm) {
+          if (!dSubNorm || cSubNorm !== dSubNorm) return false;
+        }
+
+        // Rule: Same category & same dealer strictly
         if (!c.dealerName || c.dealerName === '—' || !d.recipientName) return false;
+        if (c.category !== d.category) return false;
         if (!isSamePartyName(c.dealerName, d.recipientName)) return false;
 
         // Rule: Challan date must be on or before DO issue date
@@ -1367,11 +1804,10 @@ export function reconcileChallansAndDOs(db: AllocationDatabase): AllocationDatab
         } else if (!cIso && dIso) {
           // Undated challan only eligible if explicitly linked to this DO/sub
           const explicit =
-            (c.doNo && d.doNo && normMemoNo(c.doNo) === normMemoNo(d.doNo)) ||
+            (cDoNorm && dDoNorm && cDoNorm === dDoNorm) ||
             (d.dealerAllocationId &&
               c.dealerAllocationId &&
-              normMemoNo(d.dealerAllocationId) === normMemoNo(c.dealerAllocationId)) ||
-            (targetDoChallanNo && chKey && chKey === normChallanNo(targetDoChallanNo));
+              normMemoNo(d.dealerAllocationId) === normMemoNo(c.dealerAllocationId));
           if (!explicit) return false;
         }
 
@@ -1387,26 +1823,24 @@ export function reconcileChallansAndDOs(db: AllocationDatabase): AllocationDatab
           if (aSameRow !== bSameRow) return aSameRow - bSameRow;
         }
 
-        const aIso = toIsoDateStr(a.challanDate);
-        const bIso = toIsoDateStr(b.challanDate);
-        if (Boolean(aIso) !== Boolean(bIso)) return aIso ? -1 : 1;
-        // Earliest challan ALWAYS wins for earliest DO
-        if (aIso && bIso && aIso !== bIso) return aIso.localeCompare(bIso);
-
-        // Same-day tie-breakers: explicit link, then quantity proximity, then challanNo numeric
         const aExplicit =
-          (a.doNo && d.doNo && normMemoNo(a.doNo) === normMemoNo(d.doNo)) ||
-          (targetDoChallanNo && a.challanNo && normChallanNo(a.challanNo) === normChallanNo(targetDoChallanNo)) ||
-          (d.dealerAllocationId && a.dealerAllocationId && normMemoNo(a.dealerAllocationId) === normMemoNo(d.dealerAllocationId))
+          (d.dealerAllocationId &&
+            a.dealerAllocationId &&
+            normMemoNo(a.dealerAllocationId) === normMemoNo(d.dealerAllocationId))
             ? 0
             : 1;
         const bExplicit =
-          (b.doNo && d.doNo && normMemoNo(b.doNo) === normMemoNo(d.doNo)) ||
-          (targetDoChallanNo && b.challanNo && normChallanNo(b.challanNo) === normChallanNo(targetDoChallanNo)) ||
-          (d.dealerAllocationId && b.dealerAllocationId && normMemoNo(b.dealerAllocationId) === normMemoNo(d.dealerAllocationId))
+          (d.dealerAllocationId &&
+            b.dealerAllocationId &&
+            normMemoNo(b.dealerAllocationId) === normMemoNo(d.dealerAllocationId))
             ? 0
             : 1;
         if (aExplicit !== bExplicit) return aExplicit - bExplicit;
+
+        const aIso = toIsoDateStr(a.challanDate);
+        const bIso = toIsoDateStr(b.challanDate);
+        if (Boolean(aIso) !== Boolean(bIso)) return aIso ? -1 : 1;
+        if (aIso && bIso && aIso !== bIso) return aIso.localeCompare(bIso);
 
         if (d.allocationQty > 0) {
           const qa = a.allocationQty ? Math.abs(a.allocationQty - d.allocationQty) : 999;
@@ -1423,22 +1857,10 @@ export function reconcileChallansAndDOs(db: AllocationDatabase): AllocationDatab
         return (a.createdAt || '').localeCompare(b.createdAt || '');
       });
 
-      const best = candidates[0];
-      usedChallanIds.add(best.id);
-      const bestKey = normChallanNo(best.challanNo);
-      if (bestKey) usedChallanNoType.add(`${bestKey}::${type}`);
-      matchedDoByChallanId.set(best.id, d);
-      if (type === 'মূল চালান') {
-        matchedMainByDoId.set(d.id, best);
-        const srid = best.sourceRowId || (!best.id.startsWith('ch-ext-') && !best.id.startsWith('ch-rec-') ? best.id : '');
-        if (srid) matchedMainSourceRowByDoId.set(d.id, srid);
-      } else {
-        matchedTaxByDoId.set(d.id, best);
-      }
+      lockMatch(type, d, candidates[0]);
     }
   }
 
-  const doNoExistsSet = new Set(db.doIssues.map((d) => normMemoNo(d.doNo)).filter(Boolean));
   const allChallanNoSetByType = {
     main: new Set(
       preNormalizedChallans
@@ -1471,7 +1893,7 @@ export function reconcileChallansAndDOs(db: AllocationDatabase): AllocationDatab
       resolvedDoDate = matchingDo.issueDate;
     } else if (c.doNo) {
       // If DO exists in db.doIssues and didn't match c (wrong dealer/category/date or already used), clear stale DO link
-      if (doNoExistsSet.has(normMemoNo(c.doNo))) {
+      if (doNoExistsSet.has(normDoNo(c.doNo))) {
         resolvedDoNo = undefined;
         resolvedDoDate = undefined;
       } else if (c.doDate && c.challanDate && !isChallanOnOrBeforeDo(c.challanDate, c.doDate, false)) {
@@ -1742,7 +2164,12 @@ export async function fetchAllocationFromPublicSheet(
   }
 
   return {
-    db: buildAllocationDbFromRawTables(rawTables, matchedTabs, currentDb),
+    db: buildAllocationDbFromRawTables(
+      rawTables,
+      matchedTabs,
+      currentDb,
+      isUsSpreadsheetLocale(meta.locale)
+    ),
     title: meta.title,
     tabsFound: meta.sheetTitles,
     matchedTabNames,
@@ -1763,6 +2190,7 @@ export function countAllocationDatabaseRecords(db: AllocationDatabase): number {
     db.omsDealers.length +
     db.chairmen.length +
     db.fireServices.length +
+    (db.millers || []).length +
     db.rates.length
   );
 }
@@ -1786,6 +2214,7 @@ export async function fetchAllocationFromAppsScript(
   const res = await callGasAction<{
     title?: string;
     spreadsheetId?: string;
+    spreadsheetLocale?: string;
     sheetTitles?: string[];
     tables?: Record<string, unknown[][]>;
   }>(cleanUrl, 'readAllTabs', { spreadsheetId });
@@ -1803,6 +2232,7 @@ export async function fetchAllocationFromAppsScript(
     : Object.keys(tablesMap);
   const sheetTitle = String(res.data.title || 'Google Sheet');
   const resolvedSpreadsheetId = String(res.data.spreadsheetId || spreadsheetId || '');
+  const localePreferMdy = isUsSpreadsheetLocale(res.data.spreadsheetLocale);
 
   const entries: Array<[AllocationRawTabKey, { name: string; aliases: readonly string[] }]> = [
     ...(Object.entries(ALLOC_SHEET_TABS) as Array<
@@ -1849,7 +2279,7 @@ export async function fetchAllocationFromAppsScript(
   }
 
   return {
-    db: buildAllocationDbFromRawTables(rawTables, matchedTabs, currentDb),
+    db: buildAllocationDbFromRawTables(rawTables, matchedTabs, currentDb, localePreferMdy),
     title: sheetTitle,
     spreadsheetId: resolvedSpreadsheetId,
     tabsFound: sheetTitles,
@@ -1897,6 +2327,9 @@ export function deduplicateChallanRecords(challans: ChallanRecord[]): ChallanRec
   const exactRowSeen = new Map<string, string>();
 
   const shouldPreferNew = (existing: ChallanRecord, candidate: ChallanRecord): boolean => {
+    if ((candidate.depositedAmount > 0) !== (existing.depositedAmount > 0)) {
+      return candidate.depositedAmount > 0;
+    }
     const existingIso = toIsoDateStr(existing.challanDate) || '9999-99-99';
     const newIso = toIsoDateStr(candidate.challanDate) || '9999-99-99';
     if (newIso !== existingIso) return newIso < existingIso;
@@ -2244,24 +2677,48 @@ export function parsePastedChallanTableText(rawText: string): ChallanRecord[] {
   return deduplicateChallanRecords(inferred);
 }
 
-export function parseChallanRowsFromTable(rows: unknown[][], workbookPreferMdy = false): ChallanRecord[] {
+export function parseChallanRowsFromTable(
+  rows: unknown[][],
+  workbookPreferMdy: boolean | DateOrderPref = false
+): ChallanRecord[] {
   const challanRows = mapRowsByHeader(rows);
-  const preferMdy = detectPreferMdy(rows) || workbookPreferMdy;
+  const challanProfile = detectTableDateProfile(rows, workbookPreferMdy);
+  const doDatePref = resolveColDatePref(challanProfile, ['DO_Date', 'doDate', 'ডিও তারিখ']);
+  const fallbackDatePref = resolveColDatePref(challanProfile, ['date', 'Date', 'entryDate', 'timestamp', 'তারিখ']);
+  const mainDatePref = resolveColDatePref(challanProfile, ['Challan_Date', 'challanDate', 'mainChallanDate', 'চালানের তারিখ', 'জমার তারিখ']);
+  const taxDatePref = resolveColDatePref(challanProfile, [
+    'Tax_Challan_Date', 'taxChallanDate', 'IncomeTaxDate', 'incomeTaxDate', 'income_tax_date',
+    'আয়কর তারিখ', 'আয়কর তারিখ', 'আয়কর চালানের তারিখ', 'আয়কর চালানের তারিখ',
+  ]);
   const out: ChallanRecord[] = [];
   const seenIds = new Set<string>();
+  const normBnNfc = (v: string) =>
+    bnToEnDigits(v).normalize('NFC').replace(/\u09AF\u09BC/g, '\u09DF');
 
   challanRows.forEach((r, i) => {
-    const note = pickField(r, ['Note', 'note', 'remarks', 'comment', 'মন্তব্য']);
+    const note = pickField(r, ['Note', 'note', 'remarks', 'comment', 'মন্তব্য']).normalize('NFC');
     const rawDealerName = pickField(r, [
       'Dealer_Name', 'dealerName', 'dealer', 'Dealer',
       'Recipient_Name', 'recipientName', 'recipient', 'partyName', 'party', 'name',
       'ডিলার', 'ডিলারের নাম', 'প্রাপক', 'প্রাপকের নাম', 'প্রতিষ্ঠান', 'নাম',
-    ]);
+    ]).normalize('NFC');
     const commentPartyMatch = note.match(/প্রদানকারী\s*[:ঃ]\s*([^|\n]+)/);
-    const dealerName = rawDealerName || (commentPartyMatch ? commentPartyMatch[1].trim() : '');
+    const fireStationMatch =
+      !rawDealerName && !commentPartyMatch && isFireServiceLabel(note)
+        ? note.match(/^([^|\n]+?\b(?:fire\s*(?:service|station)|ফায়ার\s*সার্ভিস|ফায়ার\s*সার্ভিস)(?:\s*(?:ও|and)?\s*(?:সিভিল\s*ডিফেন্স|civil\s*defen[cs]e))?)/i)
+        : null;
+    const dealerName =
+      rawDealerName ||
+      (commentPartyMatch ? commentPartyMatch[1].trim() : '') ||
+      (fireStationMatch ? fireStationMatch[1].trim() : '');
     const dealerAllocationId = pickField(r, [
       'dealerAllocationId', 'dealer_allocation_id', 'suballocationId', 'allocationId',
     ]);
+    const deptValues = Array.isArray(r.__list_department)
+      ? (r.__list_department as string[]).map((d) => normBnNfc(d).toLowerCase())
+      : [normBnNfc(pickField(r, ['department', 'dept', 'দপ্তর'])).toLowerCase()].filter(Boolean);
+    const deptJoined = deptValues.join(' | ');
+
     const baseCategory = normalizeCategoryName(
       pickField(r, CATEGORY_FIELD_KEYS),
       `${dealerName} ${note}`
@@ -2270,7 +2727,7 @@ export function parseChallanRowsFromTable(rows: unknown[][], workbookPreferMdy =
     const doNo = pickField(r, ['DO_No', 'doNo', 'doNumber', 'ডিও নং', 'ডিও নম্বর', 'ডিও']);
     const doDate = parseDateStr(
       pickField(r, ['DO_Date', 'doDate', 'ডিও তারিখ']),
-      preferMdy
+      doDatePref
     ) || undefined;
 
     const mainNo = pickField(r, [
@@ -2280,20 +2737,25 @@ export function parseChallanRowsFromTable(rows: unknown[][], workbookPreferMdy =
     ]);
     const taxNoExplicit = pickField(r, [
       'Tax_Challan_No', 'taxChallanNo', 'IncomeTaxChallanNo', 'incomeTaxChallanNo',
-      'আয়কর চালান নং', 'আয়কর চালান', 'ভ্যাট/আয়কর চালান', 'ট্যাক্স চালান',
+      'আয়কর চালান নং', 'আয়কর চালান নং', 'আয়কর চালান', 'আয়কর চালান', 'ভ্যাট/আয়কর চালান', 'ট্যাক্স চালান',
     ]);
 
-    const mainDate = parseDateStr(
-      pickField(r, ['Challan_Date', 'challanDate', 'mainChallanDate', 'date', 'Date', 'entryDate', 'timestamp', 'তারিখ', 'চালানের তারিখ', 'জমার তারিখ']),
-      preferMdy
+    const fallbackDate = parseDateStr(
+      pickField(r, ['date', 'Date', 'entryDate', 'timestamp', 'তারিখ']),
+      fallbackDatePref
     );
+    const mainDate =
+      parseDateStr(
+        pickField(r, ['Challan_Date', 'challanDate', 'mainChallanDate', 'চালানের তারিখ', 'জমার তারিখ']),
+        mainDatePref
+      ) || fallbackDate;
     const taxDate =
       parseDateStr(
         pickField(r, [
           'Tax_Challan_Date', 'taxChallanDate', 'IncomeTaxDate', 'incomeTaxDate', 'income_tax_date',
-          'আয়কর তারিখ', 'আয়কর চালানের তারিখ',
+          'আয়কর তারিখ', 'আয়কর তারিখ', 'আয়কর চালানের তারিখ', 'আয়কর চালানের তারিখ',
         ]),
-        preferMdy
+        taxDatePref
       ) || mainDate;
 
     const rawCreatedAt = pickField(r, ['Created_At', 'createdAt', 'timestamp']);
@@ -2301,28 +2763,43 @@ export function parseChallanRowsFromTable(rows: unknown[][], workbookPreferMdy =
 
     const rawType = pickField(r, ['Challan_Type', 'challanType', 'type', 'Type', 'kind', 'ধরন', 'চালানের ধরন']);
     const rate = pickNum(r, ['rate', 'unitPrice', 'দর']);
-    const qty = pickNum(r, ['quantity', 'qty', 'allocationQty', 'পরিমাণ']);
+    let qty = pickNum(r, ['quantity', 'qty', 'allocationQty', 'পরিমাণ']);
+    if (qty <= 0 && note) {
+      const noteBnEn = normBnNfc(note);
+      const mtMatch = noteBnEn.match(/(\d+(?:\.\d+)?)\s*(?:MT\b|Metric\s*Ton|মে\.?\s*টন|মেট্রিক\s*টন)/i);
+      if (mtMatch) qty = parseNum(mtMatch[1]);
+    }
+
     const recMainRaw = pickNum(r, [
       'Recorded_Amount', 'recordedAmount', 'requiredAmount', 'payableAmount', 'targetAmount',
-      'রেকর্ড অনুযায়ী টাকা', 'রেকর্ড টাকা', 'রেকর্ড', 'ধার্যকৃত টাকা', 'প্রদেয় টাকা',
+      'রেকর্ড অনুযায়ী টাকা', 'রেকর্ড অনুযায়ী টাকা', 'রেকর্ড টাকা', 'রেকর্ড', 'ধার্যকৃত টাকা', 'প্রদেয় টাকা', 'প্রদেয় টাকা',
     ]);
-    const recMain = recMainRaw > 0 ? recMainRaw : rate > 0 && qty > 0 ? round2(rate * qty) : 0;
+    // Only trust rate * qty when rate is a genuine per-MT rate (500..80000); ignore per-KG (e.g. 13) or mistyped total amounts in rate column
+    const recMain =
+      recMainRaw > 0
+        ? recMainRaw
+        : rate >= 500 && rate <= 80000 && qty > 0
+          ? round2(rate * qty)
+          : 0;
 
     const depMain = pickNum(r, [
       'Deposited_Amount', 'depositedAmount', 'paidAmount', 'depositAmount', 'challanAmount',
       'amount', 'Amount', 'totalAmount', 'মূল চালান টাকা', 'জমাকৃত টাকা', 'জমার পরিমাণ', 'জমা', 'মোট টাকা', 'টাকা',
     ]);
 
-    const recTax = pickNum(r, ['Required_Tax_Amount', 'requiredTaxAmount', 'recordedTaxAmount', 'রেকর্ড আয়কর']);
+    const recTax = pickNum(r, [
+      'Required_Tax_Amount', 'requiredTaxAmount', 'recordedTaxAmount', 'রেকর্ড আয়কর', 'রেকর্ড আয়কর',
+    ]);
     const depTax = pickNum(r, [
       'Tax_Challan_Amount', 'taxChallanAmount', 'IncomeTaxAmount', 'incomeTaxAmount', 'income_tax_amount',
-      'taxAmount', 'depositedTaxAmount', 'আয়কর টাকা', 'আয়করের পরিমাণ',
+      'taxAmount', 'depositedTaxAmount', 'আয়কর টাকা', 'আয়কর টাকা', 'আয়করের পরিমাণ', 'আয়করের পরিমাণ',
     ]);
 
     const parsedQty = qty > 0 ? round3(qty) : undefined;
     const rawRowId = pickField(r, ['ID', 'id']);
+    const baseRowId = rawRowId ? rawRowId.replace(/-(TAX|MAIN)$/i, '').trim() : '';
 
-    // Case A: Row has BOTH explicit main + tax challan columns -> parse cleanly into paired records referencing same sourceRowId
+    // Case A: Row has BOTH explicit main + tax challan columns -> parse cleanly into paired records referencing same base sourceRowId
     if ((taxNoExplicit || depTax > 0) && (mainNo || depMain > 0)) {
       if (mainNo || dealerName || dealerAllocationId) {
         const mId = rawRowId
@@ -2330,7 +2807,7 @@ export function parseChallanRowsFromTable(rows: unknown[][], workbookPreferMdy =
           : makeDeterministicChallanId('ch-ext-m', 'মূল চালান', mainNo, mainDate, dealerName, baseCategory, i, seenIds);
         out.push({
           id: mId,
-          sourceRowId: rawRowId || undefined,
+          sourceRowId: baseRowId || undefined,
           challanNo: mainNo,
           challanDate: mainDate,
           category: baseCategory,
@@ -2350,19 +2827,21 @@ export function parseChallanRowsFromTable(rows: unknown[][], workbookPreferMdy =
       const sameAsMainNo =
         Boolean(mainNo) && Boolean(taxNoExplicit) && normChallanNo(taxNoExplicit) === normChallanNo(mainNo);
       if (taxNoExplicit && (!sameAsMainNo || depTax > 0)) {
-        const tId = makeDeterministicChallanId(
-          'ch-ext-t',
-          'আয়কর চালান',
-          taxNoExplicit,
-          taxDate,
-          dealerName,
-          baseCategory,
-          i,
-          seenIds
-        );
+        const tId = baseRowId
+          ? makeUniqueId(`${baseRowId}-TAX`, 'ch-ext-t', i, seenIds)
+          : makeDeterministicChallanId(
+              'ch-ext-t',
+              'আয়কর চালান',
+              taxNoExplicit,
+              taxDate,
+              dealerName,
+              baseCategory,
+              i,
+              seenIds
+            );
         out.push({
           id: tId,
-          sourceRowId: rawRowId || undefined,
+          sourceRowId: baseRowId || undefined,
           challanNo: taxNoExplicit,
           challanDate: taxDate,
           category: baseCategory,
@@ -2382,16 +2861,23 @@ export function parseChallanRowsFromTable(rows: unknown[][], workbookPreferMdy =
       return;
     }
 
-    // Case B: Single challan per row
+    // Case B: Single challan per row (e.g. July split Main vs -TAX rows, EP rows, or app-exported Challan rows)
     const finalNo = mainNo || taxNoExplicit;
     if (!finalNo && !dealerName && !dealerAllocationId) return;
     if (!finalNo && depMain <= 0 && depTax <= 0 && recMain <= 0 && recTax <= 0) return;
     if (!finalNo && /^(মোট|সর্বমোট|total|grand\s*total)$/i.test(dealerName.trim())) return;
+
+    const rawTypeNfc = normBnNfc(rawType).toLowerCase();
+    const isExplicitTaxTypeCol =
+      rawTypeNfc.includes('আয়কর') ||
+      rawTypeNfc.includes('tax') ||
+      rawTypeNfc.includes('vat') ||
+      rawTypeNfc.includes('ভ্যাট');
+    const deptHasTaxZone = deptJoined.includes('কর অঞ্চল') || deptJoined.includes('tax');
     const isTax =
-      rawType.includes('আয়কর') ||
-      rawType.toLowerCase().includes('tax') ||
-      rawType.toLowerCase().includes('vat') ||
-      (!mainNo && (Boolean(taxNoExplicit) || depTax > 0));
+      isExplicitTaxTypeCol ||
+      /-tax$/i.test(rawRowId.trim()) ||
+      (!Boolean(mainNo) && !(depMain > 0) && (Boolean(taxNoExplicit) || depTax > 0 || deptHasTaxZone));
 
     const cType: ChallanRecord['challanType'] = isTax ? 'আয়কর চালান' : 'মূল চালান';
     const cDate = isTax ? taxDate : mainDate;
@@ -2401,7 +2887,7 @@ export function parseChallanRowsFromTable(rows: unknown[][], workbookPreferMdy =
 
     out.push({
       id: cId,
-      sourceRowId: rawRowId || undefined,
+      sourceRowId: baseRowId || undefined,
       challanNo: finalNo,
       challanDate: cDate,
       category: baseCategory,
@@ -2412,14 +2898,53 @@ export function parseChallanRowsFromTable(rows: unknown[][], workbookPreferMdy =
       doNo,
       doDate,
       allocationQty: parsedQty,
-      recordedAmount: isTax ? recTax || recMain : recMain,
+      // Never use main rate*qty (recMain) as recordedAmount for an income tax challan
+      recordedAmount: isTax ? recTax : recMain,
       depositedAmount: isTax ? depTax || depMain : depMain,
       note,
       createdAt: stableCreatedAt,
     });
   });
 
-  return deduplicateChallanRecords(out);
+  // Inherit dealerName, dealerAllocationId, allocationQty, and challanDate between split Main & -TAX rows sharing baseRowId (e.g. CHL-xxx & CHL-xxx-TAX)
+  const pairInfoByBase = new Map<
+    string,
+    { dealerName?: string; dealerAllocationId?: string; allocationQty?: number; challanDate?: string }
+  >();
+  for (const rec of out) {
+    const base = (rec.sourceRowId || '').trim();
+    if (!base) continue;
+    const info = pairInfoByBase.get(base) || {};
+    if ((!info.dealerName || info.dealerName === '—') && rec.dealerName && rec.dealerName !== '—') {
+      info.dealerName = rec.dealerName;
+    }
+    if (!info.dealerAllocationId && rec.dealerAllocationId) {
+      info.dealerAllocationId = rec.dealerAllocationId;
+    }
+    if ((!info.allocationQty || info.allocationQty <= 0) && rec.allocationQty && rec.allocationQty > 0) {
+      info.allocationQty = rec.allocationQty;
+    }
+    if (!info.challanDate && rec.challanDate) {
+      info.challanDate = rec.challanDate;
+    }
+    pairInfoByBase.set(base, info);
+  }
+  const pairedOut = out.map((rec) => {
+    const base = (rec.sourceRowId || '').trim();
+    const info = base ? pairInfoByBase.get(base) : undefined;
+    if (!info) return rec;
+    return {
+      ...rec,
+      dealerName:
+        rec.dealerName && rec.dealerName !== '—' ? rec.dealerName : info.dealerName || rec.dealerName,
+      dealerAllocationId: rec.dealerAllocationId || info.dealerAllocationId,
+      allocationQty:
+        rec.allocationQty && rec.allocationQty > 0 ? rec.allocationQty : info.allocationQty,
+      challanDate: rec.challanDate || info.challanDate || '',
+    };
+  });
+
+  return deduplicateChallanRecords(pairedOut);
 }
 
 export async function fetchExternalChallansFromSheet(
@@ -2446,7 +2971,10 @@ export async function fetchExternalChallansFromSheet(
         `${SHEETS_API_BASE}/${encodeURIComponent(spreadsheetId)}/values:batchGet?ranges=${encodeURIComponent(`'${escaped}'!A1:ZZ`)}&majorDimension=ROWS&valueRenderOption=UNFORMATTED_VALUE`,
         accessToken
       );
-      const parsed = parseChallanRowsFromTable(resp.valueRanges?.[0]?.values || []);
+      const parsed = parseChallanRowsFromTable(
+        resp.valueRanges?.[0]?.values || [],
+        isUsSpreadsheetLocale(meta.locale)
+      );
       if (parsed.length > 0) {
         return { challans: parsed, title: meta.title, tabUsed: tab };
       }
@@ -2469,7 +2997,7 @@ export async function fetchExternalChallansFromSheet(
 
   for (const tab of candidates.slice(0, 6)) {
     const rows = await fetchPublicCsvSheet(spreadsheetId, gidMap[tab], tab);
-    const parsed = parseChallanRowsFromTable(rows);
+    const parsed = parseChallanRowsFromTable(rows, isUsSpreadsheetLocale(meta.locale));
     if (parsed.length > 0) {
       return { challans: parsed, title: meta.title, tabUsed: tab };
     }
@@ -2622,7 +3150,12 @@ export async function fetchAllocationFromOAuthSheet(
   }
 
   return {
-    db: buildAllocationDbFromRawTables(rawTables, matchedTabs, currentDb),
+    db: buildAllocationDbFromRawTables(
+      rawTables,
+      matchedTabs,
+      currentDb,
+      isUsSpreadsheetLocale(meta.locale)
+    ),
     title: meta.title,
     tabsFound: meta.sheetTitles,
     matchedTabNames,
@@ -2716,6 +3249,7 @@ const TAB_COLUMN_ALIASES: Record<AllocationTabKey, Record<string, string[]>> = {
     salesCenter: ['salescenter', 'center', 'distributioncenter', 'বিক্রয়কেন্দ্র', 'কেন্দ্র'],
     cardCount: ['cardcount', 'cards', 'totalcards', 'কার্ড', 'কার্ডসংখ্যা'],
     unusedCards: ['unusedcards', 'unsoldcards', 'অবিক্রিতকার্ড'],
+    openingStock: ['openingstock', 'openingstockmt', 'প্রারম্ভিকমজুদ'],
     allocationQty: ['allocationqty', 'qty', 'quantity', 'subqty', 'mt', 'পরিমাণ', 'পরিমাণমেটন', 'উপবরাদ্দ', 'বরাদ্দ'],
     totalAmount: ['totalamount', 'amount', 'price', 'টাকা', 'মোটটাকা'],
     taxAmount: ['taxamount', 'tax', 'incometax', 'আয়কর'],
@@ -2838,6 +3372,7 @@ const TAB_COLUMN_ALIASES: Record<AllocationTabKey, Record<string, string[]>> = {
     supervisorName: ['supervisorname', 'তদারকিকর্মকর্তা'],
     supervisorDesignation: ['supervisordesignation', 'পদবি', 'পদবী'],
     supervisorMobile: ['supervisormobile'],
+    tcbCardCount: ['tcbcardcount', 'tcbcards', 'টিসিবিকার্ড', 'টিসিপিকার্ড', 'টিসিবিকার্ডসংখ্যা'],
   },
   omsDealers: {
     id: ['id', 'rowid', 'uid'],
@@ -2856,6 +3391,7 @@ const TAB_COLUMN_ALIASES: Record<AllocationTabKey, Record<string, string[]>> = {
     supervisorName: ['supervisorname', 'তদারকিকর্মকর্তা'],
     supervisorDesignation: ['supervisordesignation', 'পদবি', 'পদবী'],
     supervisorMobile: ['supervisormobile'],
+    tcbCardCount: ['tcbcardcount', 'tcbcards', 'টিসিবিকার্ড', 'টিসিপিকার্ড', 'টিসিবিকার্ডসংখ্যা'],
   },
   chairmen: {
     id: ['id', 'rowid', 'uid'],
@@ -2871,6 +3407,19 @@ const TAB_COLUMN_ALIASES: Record<AllocationTabKey, Record<string, string[]>> = {
     divisionName: ['divisionname', 'division', 'বিভাগীয়কার্যালয়'],
     riceRate: ['ricerate'],
     wheatRate: ['wheatrate'],
+  },
+  millers: {
+    id: ['id', 'rowid', 'uid'],
+    millerName: ['millername', 'miller', 'মিলারেরনাম', 'মিলার', 'নাম'],
+    millName: ['millname', 'mill', 'ricemill', 'মিলেরনাম', 'প্রতিষ্ঠান', 'রাইসমিল'],
+    ownerName: ['ownername', 'owner', 'মিলমালিক', 'মালিকেরনাম', 'মালিক'],
+    representativeName: ['representativename', 'representative', 'rep', 'প্রতিনিধি', 'প্রতিনিধিরনাম'],
+    recipientRole: ['recipientrole', 'role', 'প্রাপকধরন', 'ধরন'],
+    mobile: ['mobile', 'phone', 'মোবাইল'],
+    unionName: ['unionname', 'union', 'ইউনিয়ন'],
+    address: ['address', 'ঠিকানা', 'স্থান'],
+    licenseNo: ['licenseno', 'license', 'লাইসেন্স'],
+    note: ['note', 'মন্তব্য'],
   },
   rates: {
     id: ['id', 'rowid', 'uid'],
@@ -3103,11 +3652,12 @@ function combineChallansForCombinedSheet(
   return [[...COMBINED_CHALLAN_HEADERS], ...outRows];
 }
 
-function toCleanIsoDate(val: unknown): string {
-  const s = String(val ?? '').trim();
-  if (!s) return '';
-  const parsed = parseDateStr(s);
-  return /^\d{4}-\d{2}-\d{2}$/.test(parsed) ? parsed : s;
+function toCleanIsoDate(val: unknown, preferMdy: boolean | DateOrderPref = false): string {
+  if (val === null || val === undefined || val === '') return '';
+  const parsed = parseDateStr(val, preferMdy);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(parsed)) return parsed;
+  const s = String(val).trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : parsed || s;
 }
 
 function normalizeGrainType(raw: unknown, fallback: GrainType = 'চাল'): GrainType {
@@ -3166,7 +3716,8 @@ function computeFiscalYearFormatted(dateStr: string, sampleStyle = ''): string {
 
 export function projectPayloadRowsForExistingSheet(
   payload: BuiltSheetTabPayload,
-  existingGrid: unknown[][]
+  existingGrid: unknown[][],
+  localePreferMdy = false
 ): { startRow: number; rows: Array<Array<string | number>> } {
   if (payload.key === 'settings' || !existingGrid || existingGrid.length === 0) {
     return { startRow: 1, rows: payload.rows };
@@ -3365,6 +3916,8 @@ export function projectPayloadRowsForExistingSheet(
     'requiredtaxamount', 'recordedtaxamount', 'রেকর্ডআয়কর',
   ]);
 
+  const existingDateProfile = detectTableDateProfile(existingGrid, localePreferMdy);
+
   const projectedRows: Array<Array<string | number>> = [targetHeaders];
   for (let rIdx = 1; rIdx < activeRows.length; rIdx++) {
     const srcRow = activeRows[rIdx];
@@ -3381,6 +3934,8 @@ export function projectPayloadRowsForExistingSheet(
 
     const outRow: Array<string | number> = targetHeaders.map((th, colIdx) => {
       const nh = normColKey(th);
+      const isDateCol = isDateColumnHeader(th);
+      const colDatePref = existingDateProfile.colPrefByIdx.get(colIdx) || existingDateProfile.tablePref;
       const srcIdx = activeAliasToIncomingIdx.get(nh);
       if (srcIdx !== undefined) {
         const val = srcRow[srcIdx] ?? '';
@@ -3400,7 +3955,11 @@ export function projectPayloadRowsForExistingSheet(
           colIdx < existingHeaders.length &&
           String(oldRow[colIdx] ?? '').trim() !== ''
         ) {
+          if (isDateCol) return toCleanIsoDate(oldRow[colIdx], colDatePref);
           return typeof oldRow[colIdx] === 'number' ? (oldRow[colIdx] as number) : String(oldRow[colIdx]);
+        }
+        if (isDateCol && String(val).trim() !== '') {
+          return toCleanIsoDate(val, colDatePref);
         }
         return val;
       }
@@ -3421,6 +3980,7 @@ export function projectPayloadRowsForExistingSheet(
       if (oldRow && colIdx < existingHeaders.length) {
         const oldVal = oldRow[colIdx];
         if (oldVal !== undefined && oldVal !== null && String(oldVal).trim() !== '') {
+          if (isDateCol) return toCleanIsoDate(oldVal, colDatePref);
           return typeof oldVal === 'number' ? oldVal : String(oldVal);
         }
       }
@@ -3546,6 +4106,53 @@ function cellToVal_(v) {
   return v === null || v === undefined ? '' : v;
 }
 
+function isDateHeaderKey_(h) {
+  var nk = normColKey_(h);
+  if (!nk || nk === 'createdat' || nk === 'updatedat' || nk === 'timestamp' || nk === 'created') return false;
+  var dateKeys = [
+    'date','memodate','orderdate','entrydate','dcdate','dcmemodate','unodate','ucfdate','subdate',
+    'issuedate','dodate','challandate','mainchallandate','taxchallandate','incometaxdate','incometaxchallandate','podate',
+    'তারিখ','স্মারকতারিখ','স্মারকেরতারিখ','ডিসিতারিখ','ডিসিতারিক','উপবরাদ্দতারিখ',
+    'ইস্যুতারিখ','ডিওতারিখ','চালানেরতারিখ','জমারতারিখ','আয়করতারিখ','আয়করচালানেরতারিখ','পেঅর্ডারতারিখ'
+  ];
+  return dateKeys.indexOf(nk) >= 0;
+}
+
+function normalizeSheetDateVal_(v, preferMdy) {
+  if (v === null || v === undefined || v === '') return '';
+  if (v instanceof Date) {
+    return Utilities.formatDate(v, Session.getScriptTimeZone() || 'Asia/Dhaka', 'yyyy-MM-dd');
+  }
+  var s = String(v).replace(/[০-৯]/g, function(d) {
+    return String('০১২৩৪৫৬৭৮৯'.indexOf(d));
+  }).trim();
+  if (!s) return '';
+  var mIso = s.match(/^(\\d{4})[-/](\\d{1,2})[-/](\\d{1,2})(?:$|[^\\d])/);
+  if (mIso) {
+    var im = Number(mIso[2]);
+    var id = Number(mIso[3]);
+    if (im >= 1 && im <= 12 && id >= 1 && id <= 31) {
+      return mIso[1] + '-' + (im < 10 ? '0' + im : im) + '-' + (id < 10 ? '0' + id : id);
+    }
+  }
+  var mSlash = s.match(/^(\\d{1,2})([/-])(\\d{1,2})\\2(\\d{4})(?:$|[^\\d])/);
+  if (mSlash) {
+    var a = Number(mSlash[1]);
+    var b = Number(mSlash[3]);
+    var yr = mSlash[4];
+    var mon;
+    var day;
+    if (a > 12) { day = a; mon = b; }
+    else if (b > 12) { mon = a; day = b; }
+    else if (preferMdy) { mon = a; day = b; }
+    else { day = a; mon = b; }
+    if (mon >= 1 && mon <= 12 && day >= 1 && day <= 31) {
+      return yr + '-' + (mon < 10 ? '0' + mon : mon) + '-' + (day < 10 ? '0' + day : day);
+    }
+  }
+  return s;
+}
+
 function computeFiscalYear_(dateVal, sampleStyle) {
   var s = String(dateVal || '').trim();
   var m = s.match(/^(\\d{4})-(\\d{2})/);
@@ -3573,7 +4180,7 @@ var OLD_ID_FIRST_MAP_ = {
   challans: ['id','challanno','challandate','category','dealername','challantype','bankname','dono','recordedamount','depositedamount','note','createdat','dealerallocationid','dodate','allocationqty']
 };
 
-function projectRowsForSheet_(sheet, t) {
+function projectRowsForSheet_(sheet, t, isUsLocale) {
   var rows = t.rows;
   if (t.key === 'settings' || t.name === 'Alloc_Settings') {
     return { startRow: 1, rows: rows };
@@ -3780,16 +4387,18 @@ function projectRowsForSheet_(sheet, t) {
     var rDate = dateInIdx >= 0 ? String(srcRow[dateInIdx] || '') : '';
     var line = [];
     for (var tj = 0; tj < targetHeaders.length; tj++) {
-      var thn = normColKey_(targetHeaders[tj]);
+      var thRaw = targetHeaders[tj];
+      var thn = normColKey_(thRaw);
+      var isDateCol = isDateHeaderKey_(thRaw);
       var sIdx = aliasMap[thn];
       if (sIdx !== undefined) {
         var cellVal = srcRow[sIdx] === undefined || srcRow[sIdx] === null ? '' : srcRow[sIdx];
         if (sIdx === idInIdx && oldRow && existingIdCol >= 0 && String(oldRow[existingIdCol] || '').trim() !== '' && (String(cellVal).indexOf('ch-ext-') === 0 || String(cellVal).indexOf('ch-rec-') === 0)) {
           line.push(String(oldRow[existingIdCol]).trim());
         } else if (String(cellVal).trim() === '' && preserveBlankTokens.indexOf(thn) >= 0 && oldRow && tj < existingHeaders.length && String(cellToVal_(oldRow[tj])).trim() !== '') {
-          line.push(cellToVal_(oldRow[tj]));
+          line.push(isDateCol ? normalizeSheetDateVal_(oldRow[tj], isUsLocale) : cellToVal_(oldRow[tj]));
         } else {
-          line.push(cellVal);
+          line.push(isDateCol ? normalizeSheetDateVal_(cellVal, isUsLocale) : cellVal);
         }
       } else if (slTokens.indexOf(thn) >= 0) {
         line.push(ri);
@@ -3801,7 +4410,7 @@ function projectRowsForSheet_(sheet, t) {
       } else if (t.key === 'challans' && !useCombinedChallan && splitTaxTokens.indexOf(thn) >= 0) {
         line.push('');
       } else if (oldRow && tj < existingHeaders.length && String(cellToVal_(oldRow[tj])).trim() !== '') {
-        line.push(cellToVal_(oldRow[tj]));
+        line.push(isDateCol ? normalizeSheetDateVal_(oldRow[tj], isUsLocale) : cellToVal_(oldRow[tj]));
       } else {
         line.push(colModes[tj] !== undefined ? colModes[tj] : '');
       }
@@ -3863,6 +4472,7 @@ function readAllTabsFromApp_(payload) {
     ok: true,
     title: ss.getName(),
     spreadsheetId: ss.getId(),
+    spreadsheetLocale: ss.getSpreadsheetLocale(),
     sheetTitles: sheetTitles,
     tables: tables
   };
@@ -3879,6 +4489,7 @@ function syncAllTabsFromApp_(payload) {
         : 'Spreadsheet পাওয়া যায়নি। অ্যাপের ১ নম্বর ঘরে Google Sheet ID দিন।'
     };
   }
+  var isUsLocale = /^(?:en_US|en_AS|en_GU|en_MH|en_MP|en_PR|en_UM|en_VI|es_US)$/i.test(String(ss.getSpreadsheetLocale() || ''));
   var tabs = Array.isArray(payload && payload.tabs) ? payload.tabs : [];
   var incomingCoreRows = 0;
   for (var cIdx = 0; cIdx < tabs.length; cIdx++) {
@@ -3987,7 +4598,7 @@ function syncAllTabsFromApp_(payload) {
           }
         }
       }
-      var projected = projectRowsForSheet_(sheet, t);
+      var projected = projectRowsForSheet_(sheet, t, isUsLocale);
       var rows = projected.rows;
       var maxCols = 1;
       for (var r = 0; r < rows.length; r++) {
@@ -4009,6 +4620,14 @@ function syncAllTabsFromApp_(payload) {
         sheet.getRange(startRow, 1, prevLastRow - startRow + 1, prevLastCol).clearContent();
       }
       sheet.getRange(startRow, 1, padded.length, maxCols).setValues(padded);
+      if (padded.length > 1) {
+        var hdrRow = padded[0] || [];
+        for (var dc = 0; dc < hdrRow.length; dc++) {
+          if (isDateHeaderKey_(hdrRow[dc])) {
+            sheet.getRange(startRow + 1, dc + 1, padded.length - 1, 1).setNumberFormat('yyyy-mm-dd');
+          }
+        }
+      }
       updated++;
     }
   }
@@ -4153,6 +4772,7 @@ export function buildAllocationSheetPayloads(
           r.taxAmount,
           r.createdAt,
           r.id,
+          r.openingStock ?? '',
         ]),
       ],
     },
@@ -4336,6 +4956,7 @@ export function buildAllocationSheetPayloads(
           r.supervisorName,
           r.supervisorDesignation,
           r.supervisorMobile,
+          r.tcbCardCount ?? 0,
         ]),
       ],
     },
@@ -4365,6 +4986,7 @@ export function buildAllocationSheetPayloads(
           r.supervisorName,
           r.supervisorDesignation,
           r.supervisorMobile,
+          r.tcbCardCount ?? 0,
         ]),
       ],
     },
@@ -4404,6 +5026,29 @@ export function buildAllocationSheetPayloads(
       ],
     },
     {
+      key: 'millers',
+      name: ALLOC_SHEET_TABS.millers.name,
+      aliases: ALLOC_SHEET_TABS.millers.aliases,
+      exactOnly: false,
+      columnAliases: TAB_COLUMN_ALIASES.millers,
+      rows: [
+        [...ALLOC_SHEET_TABS.millers.headers],
+        ...(db.millers || []).map((r) => [
+          r.id,
+          r.millerName,
+          r.millName,
+          r.ownerName,
+          r.representativeName,
+          r.recipientRole || 'mill',
+          r.mobile,
+          r.unionName,
+          r.address,
+          r.licenseNo || '',
+          r.note || '',
+        ]),
+      ],
+    },
+    {
       key: 'rates',
       name: ALLOC_SHEET_TABS.rates.name,
       aliases: ALLOC_SHEET_TABS.rates.aliases,
@@ -4425,6 +5070,7 @@ export function buildAllocationSheetPayloads(
         ...chunkSettingEntries('officer', JSON.stringify(db.officer)),
         ...chunkSettingEntries('templates', JSON.stringify(db.templates)),
         ...chunkSettingEntries('reportMemos', JSON.stringify(db.reportMemos || {})),
+        ...chunkSettingEntries('allocOrderForms', JSON.stringify(db.allocOrderForms || {})),
       ],
     },
   ];
@@ -4522,6 +5168,8 @@ export async function writeAllocationDatabaseToOAuthSheet(
     }
   }
 
+  const localePreferMdy = isUsSpreadsheetLocale(meta.locale);
+
   // Unique-challan shrink protection: never silently delete unique challans present on the Google Sheet
   if (!opts?.allowChallanShrink && !opts?.skipChallansTab) {
     const challanTarget = writeTargets.find(
@@ -4530,7 +5178,7 @@ export async function writeAllocationDatabaseToOAuthSheet(
     if (challanTarget) {
       const existingGrid = existingGridMap.get(challanTarget.targetName) || [];
       if (existingGrid.length > 1) {
-        const existingUnique = parseChallanRowsFromTable(existingGrid);
+        const existingUnique = parseChallanRowsFromTable(existingGrid, localePreferMdy);
         const incomingUnique = deduplicateChallanRecords(db.challans);
         const incomingKeys = new Set(
           incomingUnique
@@ -4556,18 +5204,27 @@ export async function writeAllocationDatabaseToOAuthSheet(
     }
   }
 
+  const resolvedSheetIdMap: Record<string, number> = { ...meta.sheetIdMap };
   if (missingTabs.length > 0) {
-    await googleFetch(`${SHEETS_API_BASE}/${encodeURIComponent(spreadsheetId)}:batchUpdate`, accessToken, {
+    const addResp = await googleFetch<{
+      replies?: Array<{ addSheet?: { properties?: { sheetId?: number; title?: string } } }>;
+    }>(`${SHEETS_API_BASE}/${encodeURIComponent(spreadsheetId)}:batchUpdate`, accessToken, {
       method: 'POST',
       body: JSON.stringify({
         requests: missingTabs.map((title) => ({ addSheet: { properties: { title } } })),
       }),
     });
+    for (const rep of addResp.replies || []) {
+      const props = rep.addSheet?.properties;
+      if (props?.title && typeof props.sheetId === 'number') {
+        resolvedSheetIdMap[props.title] = props.sheetId;
+      }
+    }
   }
 
   const projectedWrites = writeTargets.map((t) => {
     const existingGrid = t.matchedExisting ? existingGridMap.get(t.targetName) || [] : [];
-    const projected = projectPayloadRowsForExistingSheet(t.payload, existingGrid);
+    const projected = projectPayloadRowsForExistingSheet(t.payload, existingGrid, localePreferMdy);
     return {
       targetName: t.targetName,
       startRow: projected.startRow,
@@ -4604,25 +5261,61 @@ export async function writeAllocationDatabaseToOAuthSheet(
     }
   );
 
+  // Enforce uniform YYYY-MM-DD DATE numberFormat on every date column so Google Sheets never displays MM-DD-YYYY
+  const dateFormatRequests: Array<Record<string, unknown>> = [];
+  for (const p of projectedWrites) {
+    if (p.rows.length <= 1) continue;
+    const sheetId = resolvedSheetIdMap[p.targetName];
+    if (typeof sheetId !== 'number') continue;
+    const headers = p.rows[0] || [];
+    headers.forEach((h, colIdx) => {
+      if (!isDateColumnHeader(h)) return;
+      dateFormatRequests.push({
+        repeatCell: {
+          range: {
+            sheetId,
+            startRowIndex: p.startRow,
+            endRowIndex: p.startRow + p.rows.length - 1,
+            startColumnIndex: colIdx,
+            endColumnIndex: colIdx + 1,
+          },
+          cell: {
+            userEnteredFormat: {
+              numberFormat: {
+                type: 'DATE',
+                pattern: 'yyyy-mm-dd',
+              },
+            },
+          },
+          fields: 'userEnteredFormat.numberFormat',
+        },
+      });
+    });
+  }
+
   // Clean up redundant plural (...s) duplicate tabs after primary singular tabs are safely written
   const totalSheetsAfterAdd = meta.sheetTitles.length + missingTabs.length;
   const deleteIds: number[] = [];
   for (const dupTitle of duplicateTabsToDelete) {
-    const sid = meta.sheetIdMap[dupTitle];
+    const sid = resolvedSheetIdMap[dupTitle];
     if (typeof sid === 'number' && totalSheetsAfterAdd - deleteIds.length > 1) {
       deleteIds.push(sid);
     }
   }
-  if (deleteIds.length > 0) {
+  const postRequests = [
+    ...dateFormatRequests,
+    ...deleteIds.map((sheetId) => ({ deleteSheet: { sheetId } })),
+  ];
+  if (postRequests.length > 0) {
     try {
       await googleFetch(`${SHEETS_API_BASE}/${encodeURIComponent(spreadsheetId)}:batchUpdate`, accessToken, {
         method: 'POST',
         body: JSON.stringify({
-          requests: deleteIds.map((sheetId) => ({ deleteSheet: { sheetId } })),
+          requests: postRequests,
         }),
       });
     } catch {
-      // Non-fatal if a protected duplicate sheet cannot be deleted
+      // Non-fatal if date cell formatting or deleting duplicate sheet fails
     }
   }
 

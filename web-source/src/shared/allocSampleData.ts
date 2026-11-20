@@ -21,10 +21,12 @@ export function createEmptyAllocationDatabase(): AllocationDatabase {
     omsDealers: [],
     chairmen: [],
     fireServices: [],
+    millers: [],
     rates: [],
     officer,
     templates,
     reportMemos: {},
+    allocOrderForms: {},
   };
 }
 

@@ -34,6 +34,8 @@ import {
   type AllocationDatabase,
   type ChallanRecord,
   type GrainType,
+  type MillerEntry,
+  type MillerRecipientRole,
   type OfficerProfileSettings,
   type RegisterId,
 } from '../types/allocation';
@@ -142,6 +144,7 @@ interface CategoryEntryViewProps {
       salesCenter: string;
       cardCount: number;
       unusedCards: number;
+      openingStock?: number;
       allocationQty: number;
       totalAmount: number;
       taxAmount: number;
@@ -233,6 +236,10 @@ interface CategoryEntryViewProps {
     patch: { doNo: string; issueDate: string; allocationQty: number }
   ) => ActionResult;
   onDeleteDOIssue?: (id: string) => void;
+  onRelinkChallan?: (
+    challanId: string,
+    target: { dealerAllocationId?: string; doNo?: string; clearLink?: boolean }
+  ) => ActionResult;
   onOpenRegister: (regId: RegisterId) => void;
   onOpenDOIssue: () => void;
   isProjectUnlocked?: boolean;
@@ -261,6 +268,20 @@ type StepKey = 'ministry' | 'dc' | 'sub' | 'do';
 type EntryMode = 'category' | 'office';
 type OfficeTabKey = 'ministry' | 'dc' | 'uno' | 'ucf';
 
+function getMillerRecipientName(m: MillerEntry, role?: MillerRecipientRole): string {
+  const effectiveRole = role || m.recipientRole || 'mill';
+  if (effectiveRole === 'miller') {
+    return m.millerName || m.millName || m.ownerName || m.representativeName || 'মিলার';
+  }
+  if (effectiveRole === 'owner') {
+    return m.ownerName || m.millerName || m.millName || m.representativeName || 'মিল মালিক';
+  }
+  if (effectiveRole === 'representative') {
+    return m.representativeName || m.millerName || m.millName || m.ownerName || 'প্রতিনিধি';
+  }
+  return m.millName || m.millerName || m.ownerName || m.representativeName || 'মিল';
+}
+
 const CATEGORY_GROUPS = [
   'ডিলার খাত',
   'ইপি',
@@ -285,6 +306,7 @@ interface NormalizedOmsDealer {
   unionName: string;
   municipality: string;
   salesCenter: string;
+  tcbCardCount: number;
 }
 
 type SubTabKey = 'dealer' | 'chairman' | 'manual' | 'project' | 'allocated';
@@ -335,6 +357,7 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
   onIssueDOBatch,
   onUpdateDOIssue,
   onDeleteDOIssue,
+  onRelinkChallan,
   onOpenRegister,
   onOpenDOIssue,
   isProjectUnlocked,
@@ -469,7 +492,7 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
   const projSwipeStartRef = useRef<{ id: string; startX: number; startY: number } | null>(null);
   const [activeDealerCell, setActiveDealerCell] = useState<{
     rowId: string;
-    field: 'cards' | 'unused' | 'qty';
+    field: 'cards' | 'unused' | 'qty' | 'opening';
   } | null>(null);
 
   const hasProjectPassword = Boolean((db.officer.lockPin || '').trim());
@@ -519,9 +542,14 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
     qty: string;
   } | null>(null);
 
+  const syncedMasterCardsRef = useRef<Record<string, number>>({});
   const [dealerBatchState, setDealerBatchState] = useState<
-    Record<string, { selected: boolean; cards: number; unused: number; qty: string }>
+    Record<
+      string,
+      { selected: boolean; cards: number; unused: number; qty: string; openingStockMt?: string }
+    >
   >({});
+  const [millerRoles, setMillerRoles] = useState<Record<string, MillerRecipientRole>>({});
   const [unoBatchQty, setUnoBatchQty] = useState<
     Record<string, { selected: boolean; qty: string; presidentName?: string }>
   >({});
@@ -564,7 +592,8 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
     );
     return minRec?.grain || meta.defaultGrain || 'চাল';
   }, [subSourceMemo, meta, catDCList, catMinistryList]);
-  const isSubKernel = subSourceGrain === 'কার্নেল';
+  const isSubKernel = selectedCategory === 'কার্নেল' || subSourceGrain === 'কার্নেল';
+  const dcStageLabel = selectedCategory === 'কার্নেল' ? 'জেলা খাদ্য নিয়ন্ত্রক' : 'ডিসি';
 
   const hasEmbeddedDo = Boolean(
     onSaveDOBook &&
@@ -584,7 +613,7 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
         ? [
             {
               key: 'dc' as StepKey,
-              label: `২. ডিসি${meta.supportsProjects ? ' ও প্রকল্প' : ''} (${formatBnInt(catDCList.length)})`,
+              label: `২. ${dcStageLabel}${meta.supportsProjects ? ' ও প্রকল্প' : ''} (${formatBnInt(catDCList.length)})`,
             },
           ]
         : []),
@@ -821,6 +850,7 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
       unionName: d.unionName,
       municipality: d.municipality,
       salesCenter: d.salesCenter,
+      tcbCardCount: Math.max(0, d.tcbCardCount || 0),
     }));
 
     // ওএমএস সাধারণ ও ওএমএস বিশেষ -> শুধু ওএমএস ডিলার
@@ -834,6 +864,7 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
         unionName: d.unionName,
         municipality: '',
         salesCenter: d.salesCenter,
+        tcbCardCount: Math.max(0, d.tcbCardCount || 0),
       }));
       return [...omsRows, ...foodRows];
     }
@@ -875,30 +906,98 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
 
   // Reset batch selections cleanly only when category changes
   useEffect(() => {
+    syncedMasterCardsRef.current = {};
     setDealerBatchState({});
     setUnoBatchQty({});
   }, [selectedCategory]);
 
   // Populate/preserve batch rows cleanly when master lists or projects load
   useEffect(() => {
-    if (meta.flowType === 'dealer_food') {
+    if (isDealerOrEpFlow && isSubKernel) {
       setDealerBatchState((prev) => {
-        const next: Record<string, { selected: boolean; cards: number; unused: number; qty: string }> = {};
+        const next: Record<
+          string,
+          { selected: boolean; cards: number; unused: number; qty: string; openingStockMt?: string }
+        > = {};
+        for (const m of db.millers) {
+          next[m.id] = prev[m.id] || { selected: false, cards: 0, unused: 0, qty: '0.000' };
+        }
+        return next;
+      });
+      setMillerRoles((prev) => {
+        const next: Record<string, MillerRecipientRole> = { ...prev };
+        for (const m of db.millers) {
+          if (!next[m.id]) {
+            next[m.id] = m.recipientRole || 'mill';
+          }
+        }
+        return next;
+      });
+    } else if (meta.flowType === 'dealer_food') {
+      setDealerBatchState((prev) => {
+        const next: Record<
+          string,
+          { selected: boolean; cards: number; unused: number; qty: string; openingStockMt?: string }
+        > = {};
         for (const d of db.foodDealers) {
-          if (prev[d.id]) {
-            next[d.id] = prev[d.id];
+          const masterKey = `food:${d.id}`;
+          const prevEntry = prev[d.id];
+          const masterChanged = syncedMasterCardsRef.current[masterKey] !== d.cardCount;
+          if (prevEntry && !masterChanged) {
+            next[d.id] = prevEntry;
           } else {
-            const q = d.totalQty > 0 ? round3(d.totalQty) : round3(Math.max(0, d.cardCount) * 0.03);
-            next[d.id] = { selected: q > 0, cards: d.cardCount, unused: 0, qty: q.toFixed(3) };
+            const unused = prevEntry?.unused ?? 0;
+            const q =
+              d.cardCount > 0
+                ? round3(Math.max(0, d.cardCount - unused) * 0.03)
+                : d.totalQty > 0
+                  ? round3(d.totalQty)
+                  : 0;
+            next[d.id] = {
+              selected: q > 0 || d.cardCount > 0,
+              cards: d.cardCount,
+              unused,
+              qty: q.toFixed(3),
+            };
+            syncedMasterCardsRef.current[masterKey] = d.cardCount;
           }
         }
         return next;
       });
     } else if (meta.flowType === 'dealer_oms') {
+      const isTcbCat = selectedCategory === 'ওএমএস টিসিবি';
       setDealerBatchState((prev) => {
-        const next: Record<string, { selected: boolean; cards: number; unused: number; qty: string }> = {};
+        const next: Record<
+          string,
+          { selected: boolean; cards: number; unused: number; qty: string; openingStockMt?: string }
+        > = {};
         for (const d of allOmsCategoryDealers) {
-          next[d.key] = prev[d.key] || { selected: false, cards: 0, unused: 0, qty: '1.000' };
+          if (isTcbCat) {
+            const tcbKey = `tcb:${d.key}`;
+            const prevEntry = prev[d.key];
+            const tcbChanged = syncedMasterCardsRef.current[tcbKey] !== d.tcbCardCount;
+            if (prevEntry && !tcbChanged) {
+              next[d.key] = prevEntry;
+            } else {
+              const unused = prevEntry?.unused ?? 0;
+              const q = round3(Math.max(0, d.tcbCardCount - unused) * 0.005);
+              next[d.key] = {
+                selected: d.tcbCardCount > 0 || q > 0,
+                cards: d.tcbCardCount,
+                unused,
+                qty: q.toFixed(3),
+              };
+              syncedMasterCardsRef.current[tcbKey] = d.tcbCardCount;
+            }
+          } else {
+            next[d.key] = prev[d.key] || {
+              selected: false,
+              cards: 0,
+              unused: 0,
+              qty: '1.000',
+              openingStockMt: '',
+            };
+          }
         }
         return next;
       });
@@ -939,7 +1038,10 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
   }, [
     selectedCategory,
     meta.flowType,
+    isDealerOrEpFlow,
+    isSubKernel,
     subSourceMemo,
+    db.millers,
     db.foodDealers,
     allOmsCategoryDealers,
     db.fireServices,
@@ -1269,6 +1371,15 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
   );
 
   const dealerRequestTotal = useMemo(() => {
+    if (isDealerOrEpFlow && isSubKernel) {
+      return round3(
+        db.millers.reduce((sum, m) => {
+          const st = dealerBatchState[m.id];
+          if (!st?.selected) return sum;
+          return sum + parseNum(st.qty);
+        }, 0)
+      );
+    }
     if (meta.flowType === 'dealer_food') {
       return round3(
         db.foodDealers.reduce((sum, d) => {
@@ -1297,7 +1408,16 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
       );
     }
     return 0;
-  }, [meta.flowType, db.foodDealers, filteredOmsDealers, db.fireServices, dealerBatchState]);
+  }, [
+    isDealerOrEpFlow,
+    isSubKernel,
+    meta.flowType,
+    db.millers,
+    db.foodDealers,
+    filteredOmsDealers,
+    db.fireServices,
+    dealerBatchState,
+  ]);
 
   const upstreamForSub = useMemo(() => {
     if (!subSourceMemo) return { total: 0, used: 0, remaining: 0 };
@@ -1361,8 +1481,9 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
 
   const subTabDefs = useMemo(() => {
     if (isDealerOrEpFlow) {
-      const dealerCount =
-        meta.flowType === 'dealer_food'
+      const dealerCount = isSubKernel
+        ? db.millers.length
+        : meta.flowType === 'dealer_food'
           ? db.foodDealers.length
           : meta.flowType === 'dealer_oms'
             ? filteredOmsDealers.length
@@ -1370,7 +1491,11 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
       return [
         {
           key: 'dealer' as SubTabKey,
-          label: meta.flowType === 'ep' ? 'ডিলার / প্রতিষ্ঠান তালিকা' : 'ডিলার তালিকা',
+          label: isSubKernel
+            ? 'মিলার (কার্নেল) তালিকা'
+            : meta.flowType === 'ep'
+              ? 'ডিলার / প্রতিষ্ঠান তালিকা'
+              : 'ডিলার তালিকা',
           count: dealerCount,
         },
         {
@@ -1415,8 +1540,10 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
     ];
   }, [
     isDealerOrEpFlow,
+    isSubKernel,
     meta.flowType,
     meta.supportsProjects,
+    db.millers.length,
     db.foodDealers.length,
     filteredOmsDealers.length,
     db.fireServices.length,
@@ -1511,6 +1638,23 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
 
   const handleEqualDivideDealers = () => {
     if (upstreamForSub.remaining <= 0.0005) return;
+    if (isSubKernel) {
+      const selectedIds = db.millers.filter((m) => dealerBatchState[m.id]?.selected).map((m) => m.id);
+      const targets = selectedIds.length > 0 ? selectedIds : db.millers.map((m) => m.id);
+      if (targets.length === 0) return;
+      const each = round3(upstreamForSub.remaining / targets.length);
+      const targetSet = new Set(targets);
+      setDealerBatchState((prev) => {
+        const next = { ...prev };
+        for (const m of db.millers) {
+          if (targetSet.has(m.id)) {
+            next[m.id] = { ...(next[m.id] || { cards: 0, unused: 0 }), selected: true, qty: each.toFixed(3) };
+          }
+        }
+        return next;
+      });
+      return;
+    }
     if (meta.flowType === 'dealer_oms') {
       const selectedKeys = filteredOmsDealers
         .filter((d) => dealerBatchState[d.key]?.selected)
@@ -1579,6 +1723,38 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
 
   const handleSaveDealerOrEpBatch = (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubKernel) {
+      const rows = db.millers
+        .filter((m) => dealerBatchState[m.id]?.selected && parseNum(dealerBatchState[m.id].qty) > 0)
+        .map((m) => {
+          const qty = parseNum(dealerBatchState[m.id].qty);
+          const role = millerRoles[m.id] || m.recipientRole || 'mill';
+          return {
+            dealerName: getMillerRecipientName(m, role),
+            unionName: m.unionName || m.address || 'মিলার',
+            salesCenter: m.millName
+              ? m.address
+                ? `${m.millName} (${m.address})`
+                : m.millName
+              : m.address || '',
+            cardCount: 0,
+            unusedCards: 0,
+            allocationQty: qty,
+            totalAmount: 0,
+            taxAmount: 0,
+          };
+        });
+      const res = onSaveDealerBatch({
+        category: selectedCategory,
+        sourceMemo: subSourceMemo,
+        unoMemo: subUnoMemo,
+        unoDate: subUnoDate,
+        rows,
+      });
+      showResult(res);
+      if (res.ok) advanceSubSourceIfExhausted(dealerRequestTotal);
+      return;
+    }
     if (meta.flowType === 'dealer_food') {
       const rows = db.foodDealers
         .filter((d) => dealerBatchState[d.id]?.selected && parseNum(dealerBatchState[d.id].qty) > 0)
@@ -1609,16 +1785,24 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
     }
 
     if (meta.flowType === 'dealer_oms') {
+      const isTcbCat = selectedCategory === 'ওএমএস টিসিবি';
       const rows = filteredOmsDealers
         .filter((d) => dealerBatchState[d.key]?.selected && parseNum(dealerBatchState[d.key].qty) > 0)
         .map((d) => {
-          const qty = parseNum(dealerBatchState[d.key].qty);
+          const st = dealerBatchState[d.key];
+          const qty = parseNum(st.qty);
+          const openMt = isTcbCat
+            ? st.unused > 0
+              ? round3(st.unused * 0.005)
+              : 0
+            : Math.max(0, round3(parseNum(st.openingStockMt || '0')));
           return {
             dealerName: d.dealerName,
             unionName: d.areaType === 'পৌরসভা' ? d.municipality : d.unionName,
             salesCenter: d.salesCenter,
-            cardCount: 0,
-            unusedCards: 0,
+            cardCount: isTcbCat ? Math.max(0, st.cards) : 0,
+            unusedCards: isTcbCat ? Math.max(0, st.unused) : 0,
+            openingStock: openMt,
             allocationQty: qty,
             totalAmount: isSubKernel ? 0 : round2(qty * catRate.unitPrice),
             taxAmount: isSubKernel ? 0 : round2(qty * catRate.taxRate),
@@ -3362,7 +3546,11 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                   className="lg:col-span-5 rounded-2xl border border-slate-200 bg-white p-4 space-y-3"
                 >
                   <div className="flex items-center justify-between gap-2 text-sm font-bold text-slate-900">
-                    <span>{editingDcId ? 'ডিসি বরাদ্দ সম্পাদনা (এডিট)' : 'নতুন ডিসি বরাদ্দ'}</span>
+                    <span>
+                      {editingDcId
+                        ? `${dcStageLabel} বরাদ্দ সম্পাদনা (এডিট)`
+                        : `নতুন ${dcStageLabel} বরাদ্দ`}
+                    </span>
                     {editingDcId && (
                       <button
                         type="button"
@@ -3404,7 +3592,11 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                     </div>
 
                     <div>
-                      <label className="block font-bold text-slate-700 mb-1">ডিসি অফিসের স্মারক নং *</label>
+                      <label className="block font-bold text-slate-700 mb-1">
+                        {selectedCategory === 'কার্নেল'
+                          ? 'জেলা খাদ্য নিয়ন্ত্রকের স্মারক নং *'
+                          : 'ডিসি অফিসের স্মারক নং *'}
+                      </label>
                       <input
                         type="text"
                         required
@@ -3417,7 +3609,9 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
 
                     <div className="grid grid-cols-2 gap-2.5">
                       <div>
-                        <label className="block font-bold text-slate-700 mb-1">ডিসি তারিখ *</label>
+                        <label className="block font-bold text-slate-700 mb-1">
+                          {dcStageLabel} তারিখ *
+                        </label>
                         <input
                           type="date"
                           required
@@ -3644,20 +3838,22 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                     disabled={!dcMinMemo}
                     className="w-full min-h-[44px] rounded-xl bg-[#E2136E] hover:bg-[#B80D58] disabled:opacity-40 text-white text-xs font-bold cursor-pointer"
                   >
-                    {editingDcId ? 'ডিসি বরাদ্দ হালনাগাদ করুন' : 'ডিসি বরাদ্দ সংরক্ষণ করুন'}
+                    {editingDcId
+                      ? `${dcStageLabel} বরাদ্দ হালনাগাদ করুন`
+                      : `${dcStageLabel} বরাদ্দ সংরক্ষণ করুন`}
                   </button>
                 </form>
 
                 <div className="lg:col-span-7 space-y-4">
                   <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden">
                     <div className="px-4 py-3 border-b border-slate-200 text-xs font-bold text-slate-900">
-                      {selectedCategory} — সংরক্ষিত ডিসি বরাদ্দসমূহ ({formatBnInt(filteredDCList.length)}টি)
+                      {selectedCategory} — সংরক্ষিত {dcStageLabel} বরাদ্দসমূহ ({formatBnInt(filteredDCList.length)}টি)
                     </div>
                     <div className="overflow-x-auto">
                       <table className="w-full text-xs border-collapse tabular-nums">
                         <thead>
                           <tr className="bg-slate-50 border-b border-slate-200 text-slate-700 font-bold">
-                            <th className="py-2 px-3 text-left">ডিসি স্মারক ও তারিখ</th>
+                            <th className="py-2 px-3 text-left">{dcStageLabel} স্মারক ও তারিখ</th>
                             <th className="py-2 px-3 text-left">মন্ত্রণালয় স্মারক</th>
                             <th className="py-2 px-3 text-right">মোট</th>
                             <th className="py-2 px-3 text-right">ব্যবহৃত</th>
@@ -3669,7 +3865,7 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                           {filteredDCList.length === 0 ? (
                             <tr>
                               <td colSpan={6} className="py-8 text-center text-slate-500">
-                                {selectedCategory} খাতে এখনো কোনো ডিসি বরাদ্দ এন্ট্রি করা হয়নি।
+                                {selectedCategory} খাতে এখনো কোনো {dcStageLabel} বরাদ্দ এন্ট্রি করা হয়নি।
                               </td>
                             </tr>
                           ) : (
@@ -4414,7 +4610,9 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                         <div className="md:col-span-6">
                           <label className="block text-xs sm:text-sm font-bold text-slate-800 mb-1">
                             {meta.requiresDC
-                              ? 'জেলা প্রশাসক (ডিসি) / মন্ত্রণালয় উৎস স্মারক *'
+                              ? selectedCategory === 'কার্নেল'
+                                ? 'জেলা খাদ্য নিয়ন্ত্রক / মন্ত্রণালয় উৎস স্মারক *'
+                                : 'জেলা প্রশাসক (ডিসি) / মন্ত্রণালয় উৎস স্মারক *'
                               : 'মন্ত্রণালয়ের স্মারক *'}
                           </label>
                           <select
@@ -4431,7 +4629,7 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                             <option value="">
                               {(meta.requiresDC ? catDCList.length : catMinistryList.length) === 0
                                 ? '-- কোনো বরাদ্দ স্মারক এন্ট্রি করা হয়নি --'
-                                : '-- ডিসি স্মারক নির্বাচন করুন --'}
+                                : `-- ${dcStageLabel} স্মারক নির্বাচন করুন --`}
                             </option>
                             {meta.requiresDC
                               ? catDCList.map((d) => {
@@ -4449,7 +4647,7 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                                   return (
                                     <option key={d.id} value={d.dcMemo}>
                                       মন্ত্রণালয়: {toBnDigits(d.ministryMemo)}
-                                      {minRec?.grain ? ` [${minRec.grain}]` : ''} · ডিসি: {toBnDigits(d.dcMemo)} (অবশিষ্ট: {formatBnQty(u.remaining)} মে.টন
+                                      {minRec?.grain ? ` [${minRec.grain}]` : ''} · {dcStageLabel}: {toBnDigits(d.dcMemo)} (অবশিষ্ট: {formatBnQty(u.remaining)} মে.টন
                                       {meta.supportsProjects ? ` · ${toBnDigits(pendingCnt)}টি পেন্ডিং` : ''})
                                     </option>
                                   );
@@ -4502,7 +4700,7 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                               </span>
                               <span className="text-slate-300">|</span>
                               <span>
-                                ডিসি স্মারক:{' '}
+                                {dcStageLabel} স্মারক:{' '}
                                 <strong className="text-slate-900">
                                   {toBnDigits(selectedDcSourceRecord.dcMemo)}
                                 </strong>
@@ -4680,7 +4878,7 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                               </span>
 
                               <div className="flex flex-wrap items-center gap-2">
-                                {meta.flowType === 'dealer_oms' && (
+                                {!isSubKernel && meta.flowType === 'dealer_oms' && (
                                   <>
                                     <div className="flex items-center gap-1">
                                       <span className="font-bold text-slate-600">এলাকা:</span>
@@ -4720,7 +4918,7 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                                     )}
                                   </>
                                 )}
-                                {(meta.flowType === 'dealer_oms' || meta.flowType === 'ep') &&
+                                {(isSubKernel || meta.flowType === 'dealer_oms' || meta.flowType === 'ep') &&
                                   upstreamForSub.remaining > 0.0005 && (
                                     <button
                                       type="button"
@@ -4736,7 +4934,169 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                             <div className="border border-slate-200 rounded-xl overflow-hidden bg-white">
                               {/* Mobile/Tablet Touch Card List with Auto-Expanding Active Cell */}
                               <div className="lg:hidden">
-                                {meta.flowType === 'dealer_food' && (
+                                {isSubKernel && (
+                                  <>
+                                    <div className="bg-emerald-50/70 border-b border-emerald-200 px-3 py-2.5 flex items-center justify-between text-xs font-bold text-emerald-950">
+                                      <label className="inline-flex items-center gap-2 cursor-pointer">
+                                        <input
+                                          type="checkbox"
+                                          checked={
+                                            db.millers.length > 0 &&
+                                            db.millers.every((m) => dealerBatchState[m.id]?.selected)
+                                          }
+                                          onChange={(e) => {
+                                            const checked = e.target.checked;
+                                            setDealerBatchState((prev) => {
+                                              const next = { ...prev };
+                                              for (const m of db.millers) {
+                                                const cur = next[m.id] || {
+                                                  selected: checked,
+                                                  cards: 0,
+                                                  unused: 0,
+                                                  qty: '0.000',
+                                                };
+                                                next[m.id] = { ...cur, selected: checked };
+                                              }
+                                              return next;
+                                            });
+                                          }}
+                                          className="h-4 w-4 accent-[#E2136E]"
+                                        />
+                                        <span>সব মিলার নির্বাচন ({formatBnInt(db.millers.length)} জন)</span>
+                                      </label>
+                                    </div>
+                                    {db.millers.length === 0 ? (
+                                      <div className="py-6 text-center text-xs text-slate-500 px-3">
+                                        কোনো মিলার পাওয়া যায়নি। সেটিংস → মাস্টার ডাটা → মিলার (কার্নেল) থেকে মিলার যোগ করুন।
+                                      </div>
+                                    ) : (
+                                      <div className="divide-y divide-slate-200">
+                                        {db.millers.map((m) => {
+                                          const st = dealerBatchState[m.id] || {
+                                            selected: false,
+                                            cards: 0,
+                                            unused: 0,
+                                            qty: '0.000',
+                                          };
+                                          const activeRole = millerRoles[m.id] || m.recipientRole || 'mill';
+                                          const resolvedName = getMillerRecipientName(m, activeRole);
+                                          const prevAlloc =
+                                            dealerAlreadyAllocatedOnMemo.get(
+                                              resolvedName.trim().toLowerCase()
+                                            ) || 0;
+                                          const rowActive =
+                                            activeDealerCell?.rowId === m.id &&
+                                            activeDealerCell?.field === 'qty';
+
+                                          return (
+                                            <div
+                                              key={m.id}
+                                              className={`p-3 space-y-2.5 text-xs tabular-nums transition-colors ${
+                                                rowActive
+                                                  ? 'bg-rose-50/40'
+                                                  : st.selected
+                                                    ? 'bg-white'
+                                                    : 'bg-slate-50/60'
+                                              }`}
+                                            >
+                                              <div className="flex items-start justify-between gap-2">
+                                                <label className="flex items-start gap-2.5 min-w-0 cursor-pointer">
+                                                  <input
+                                                    type="checkbox"
+                                                    checked={st.selected}
+                                                    onChange={(e) =>
+                                                      setDealerBatchState((prev) => ({
+                                                        ...prev,
+                                                        [m.id]: { ...st, selected: e.target.checked },
+                                                      }))
+                                                    }
+                                                    className="mt-0.5 h-5 w-5 shrink-0 accent-[#E2136E]"
+                                                  />
+                                                  <div className="min-w-0">
+                                                    <div className="font-bold text-slate-900 text-sm break-words">
+                                                      {resolvedName}
+                                                    </div>
+                                                    <div className="text-[11px] text-slate-500 break-words">
+                                                      {m.millName ? `মিল: ${m.millName}` : ''}
+                                                      {m.unionName ? ` · ${m.unionName}` : ''}
+                                                      {m.address ? ` (${m.address})` : ''}
+                                                    </div>
+                                                    {prevAlloc > 0 && (
+                                                      <div className="text-[10.5px] font-semibold text-emerald-700">
+                                                        এই স্মারকে পূর্বে বরাদ্দ: {formatBnQty(prevAlloc)} মে.টন
+                                                      </div>
+                                                    )}
+                                                  </div>
+                                                </label>
+                                                <div className="text-right shrink-0 text-[11px] font-bold text-emerald-800">
+                                                  ০.০০ (কার্নেল)
+                                                </div>
+                                              </div>
+
+                                              <div>
+                                                <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                                                  ডিও প্রাপকের নাম (মিল / মিলার / মালিক / প্রতিনিধি)
+                                                </label>
+                                                <select
+                                                  value={activeRole}
+                                                  onChange={(e) =>
+                                                    setMillerRoles((prev) => ({
+                                                      ...prev,
+                                                      [m.id]: e.target.value as MillerRecipientRole,
+                                                    }))
+                                                  }
+                                                  className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs font-semibold"
+                                                >
+                                                  <option value="mill">মিলের নাম: {m.millName || m.millerName}</option>
+                                                  <option value="miller">মিলারের নাম: {m.millerName || m.millName}</option>
+                                                  {m.ownerName && <option value="owner">মিল মালিক: {m.ownerName}</option>}
+                                                  {m.representativeName && (
+                                                    <option value="representative">প্রতিনিধি: {m.representativeName}</option>
+                                                  )}
+                                                </select>
+                                              </div>
+
+                                              <div>
+                                                <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                                                  কার্নেল বরাদ্দ (মে.টন)
+                                                </label>
+                                                <input
+                                                  type="number"
+                                                  step="0.001"
+                                                  value={st.qty}
+                                                  onFocus={() =>
+                                                    setActiveDealerCell({ rowId: m.id, field: 'qty' })
+                                                  }
+                                                  onBlur={() =>
+                                                    setActiveDealerCell((cur) =>
+                                                      cur?.rowId === m.id ? null : cur
+                                                    )
+                                                  }
+                                                  onChange={(e) =>
+                                                    setDealerBatchState((prev) => ({
+                                                      ...prev,
+                                                      [m.id]: {
+                                                        ...st,
+                                                        selected: true,
+                                                        qty: e.target.value,
+                                                      },
+                                                    }))
+                                                  }
+                                                  className={`w-full rounded-lg text-right transition-all duration-150 focus:outline-none ${
+                                                    rowActive
+                                                      ? 'min-h-[54px] px-3.5 py-2.5 text-lg font-extrabold border-2 border-[#E2136E] bg-white ring-4 ring-[#E2136E]/15 shadow-sm text-[#E2136E]'
+                                                      : 'min-h-[46px] px-3 py-2 text-base font-bold border border-slate-300 bg-white text-slate-900'
+                                                  }`}
+                                                />
+                                              </div>
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+                                    )}
+                                  </>
+                                )}
+                                {!isSubKernel && meta.flowType === 'dealer_food' && (
                                   <>
                                     <div className="bg-slate-50 border-b border-slate-200 px-3 py-2.5 flex items-center justify-between text-xs font-bold text-slate-700">
                                       <label className="inline-flex items-center gap-2 cursor-pointer">
@@ -4966,7 +5326,7 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                                   </>
                                 )}
 
-                                {meta.flowType === 'dealer_oms' && (
+                                {!isSubKernel && meta.flowType === 'dealer_oms' && (
                                   <>
                                     <div className="bg-slate-50 border-b border-slate-200 px-3 py-2.5 flex items-center justify-between text-xs font-bold text-slate-700">
                                       <label className="inline-flex items-center gap-2 cursor-pointer">
@@ -5088,39 +5448,174 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                                                 </div>
                                               </div>
 
-                                              <div>
-                                                <label className="block text-[11px] font-bold text-slate-600 mb-1">
-                                                  বরাদ্দ (মে.টন)
-                                                </label>
-                                                <input
-                                                  type="number"
-                                                  step="0.001"
-                                                  value={st.qty}
-                                                  onFocus={() =>
-                                                    setActiveDealerCell({ rowId: d.key, field: 'qty' })
-                                                  }
-                                                  onBlur={() =>
-                                                    setActiveDealerCell((cur) =>
-                                                      cur?.rowId === d.key ? null : cur
-                                                    )
-                                                  }
-                                                  onChange={(e) =>
-                                                    setDealerBatchState((prev) => ({
-                                                      ...prev,
-                                                      [d.key]: {
-                                                        ...st,
-                                                        selected: true,
-                                                        qty: e.target.value,
-                                                      },
-                                                    }))
-                                                  }
-                                                  className={`w-full rounded-lg text-right transition-all duration-150 focus:outline-none ${
-                                                    rowActive
-                                                      ? 'min-h-[54px] px-3.5 py-2.5 text-lg font-extrabold border-2 border-[#E2136E] bg-white ring-4 ring-[#E2136E]/15 shadow-sm text-[#E2136E]'
-                                                      : 'min-h-[46px] px-3 py-2 text-base font-bold border border-slate-300 bg-white text-slate-900'
-                                                  }`}
-                                                />
-                                              </div>
+                                              {selectedCategory === 'ওএমএস টিসিবি' ? (
+                                                <div className="grid grid-cols-3 gap-2">
+                                                  <div>
+                                                    <label className="block text-[10.5px] font-bold text-slate-600 mb-1">
+                                                      টিসিবি কার্ড
+                                                    </label>
+                                                    <input
+                                                      type="number"
+                                                      value={st.cards}
+                                                      onFocus={() =>
+                                                        setActiveDealerCell({ rowId: d.key, field: 'cards' })
+                                                      }
+                                                      onBlur={() =>
+                                                        setActiveDealerCell((cur) =>
+                                                          cur?.rowId === d.key ? null : cur
+                                                        )
+                                                      }
+                                                      onChange={(e) => {
+                                                        const cards = Math.max(0, parseNum(e.target.value));
+                                                        const effQty = round3(
+                                                          Math.max(0, cards - st.unused) * 0.005
+                                                        ).toFixed(3);
+                                                        setDealerBatchState((prev) => ({
+                                                          ...prev,
+                                                          [d.key]: {
+                                                            ...st,
+                                                            selected: cards > 0,
+                                                            cards,
+                                                            qty: effQty,
+                                                          },
+                                                        }));
+                                                      }}
+                                                      className="w-full min-h-[44px] rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-center text-sm font-bold text-slate-900"
+                                                    />
+                                                  </div>
+                                                  <div>
+                                                    <label className="block text-[10.5px] font-bold text-slate-600 mb-1">
+                                                      অবশিষ্ট কার্ড
+                                                    </label>
+                                                    <input
+                                                      type="number"
+                                                      value={st.unused}
+                                                      onFocus={() =>
+                                                        setActiveDealerCell({ rowId: d.key, field: 'unused' })
+                                                      }
+                                                      onBlur={() =>
+                                                        setActiveDealerCell((cur) =>
+                                                          cur?.rowId === d.key ? null : cur
+                                                        )
+                                                      }
+                                                      onChange={(e) => {
+                                                        const unused = Math.max(0, parseNum(e.target.value));
+                                                        const effQty = round3(
+                                                          Math.max(0, st.cards - unused) * 0.005
+                                                        ).toFixed(3);
+                                                        setDealerBatchState((prev) => ({
+                                                          ...prev,
+                                                          [d.key]: {
+                                                            ...st,
+                                                            unused,
+                                                            qty: effQty,
+                                                          },
+                                                        }));
+                                                      }}
+                                                      className="w-full min-h-[44px] rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-center text-sm font-bold text-slate-900"
+                                                    />
+                                                  </div>
+                                                  <div>
+                                                    <label className="block text-[10.5px] font-bold text-slate-600 mb-1">
+                                                      বরাদ্দ (মে.টন)
+                                                    </label>
+                                                    <input
+                                                      type="number"
+                                                      step="0.001"
+                                                      value={st.qty}
+                                                      onFocus={() =>
+                                                        setActiveDealerCell({ rowId: d.key, field: 'qty' })
+                                                      }
+                                                      onBlur={() =>
+                                                        setActiveDealerCell((cur) =>
+                                                          cur?.rowId === d.key ? null : cur
+                                                        )
+                                                      }
+                                                      onChange={(e) =>
+                                                        setDealerBatchState((prev) => ({
+                                                          ...prev,
+                                                          [d.key]: {
+                                                            ...st,
+                                                            selected: true,
+                                                            qty: e.target.value,
+                                                          },
+                                                        }))
+                                                      }
+                                                      className={`w-full rounded-lg text-right transition-all duration-150 focus:outline-none ${
+                                                        rowActive
+                                                          ? 'min-h-[54px] px-3 py-2 text-lg font-extrabold border-2 border-[#E2136E] bg-white ring-4 ring-[#E2136E]/15 shadow-sm text-[#E2136E]'
+                                                          : 'min-h-[44px] px-2.5 py-1.5 text-sm font-bold border border-slate-300 bg-white text-slate-900'
+                                                      }`}
+                                                    />
+                                                  </div>
+                                                </div>
+                                              ) : (
+                                                <div className="grid grid-cols-2 gap-2">
+                                                  <div>
+                                                    <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                                                      প্রারম্ভিক মজুদ (মে.টন)
+                                                    </label>
+                                                    <input
+                                                      type="number"
+                                                      step="0.001"
+                                                      min="0"
+                                                      value={st.openingStockMt ?? ''}
+                                                      placeholder="০.০০০"
+                                                      onFocus={() =>
+                                                        setActiveDealerCell({ rowId: d.key, field: 'opening' })
+                                                      }
+                                                      onBlur={() =>
+                                                        setActiveDealerCell((cur) =>
+                                                          cur?.rowId === d.key ? null : cur
+                                                        )
+                                                      }
+                                                      onChange={(e) =>
+                                                        setDealerBatchState((prev) => ({
+                                                          ...prev,
+                                                          [d.key]: {
+                                                            ...st,
+                                                            openingStockMt: e.target.value,
+                                                          },
+                                                        }))
+                                                      }
+                                                      className="w-full min-h-[46px] px-3 py-2 text-base font-bold rounded-lg border border-slate-300 bg-white text-right text-slate-900"
+                                                    />
+                                                  </div>
+                                                  <div>
+                                                    <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                                                      বরাদ্দ (মে.টন)
+                                                    </label>
+                                                    <input
+                                                      type="number"
+                                                      step="0.001"
+                                                      value={st.qty}
+                                                      onFocus={() =>
+                                                        setActiveDealerCell({ rowId: d.key, field: 'qty' })
+                                                      }
+                                                      onBlur={() =>
+                                                        setActiveDealerCell((cur) =>
+                                                          cur?.rowId === d.key ? null : cur
+                                                        )
+                                                      }
+                                                      onChange={(e) =>
+                                                        setDealerBatchState((prev) => ({
+                                                          ...prev,
+                                                          [d.key]: {
+                                                            ...st,
+                                                            selected: true,
+                                                            qty: e.target.value,
+                                                          },
+                                                        }))
+                                                      }
+                                                      className={`w-full rounded-lg text-right transition-all duration-150 focus:outline-none ${
+                                                        rowActive
+                                                          ? 'min-h-[54px] px-3.5 py-2.5 text-lg font-extrabold border-2 border-[#E2136E] bg-white ring-4 ring-[#E2136E]/15 shadow-sm text-[#E2136E]'
+                                                          : 'min-h-[46px] px-3 py-2 text-base font-bold border border-slate-300 bg-white text-slate-900'
+                                                      }`}
+                                                    />
+                                                  </div>
+                                                </div>
+                                              )}
                                             </div>
                                           );
                                         })}
@@ -5129,7 +5624,7 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                                   </>
                                 )}
 
-                                {meta.flowType === 'ep' && (
+                                {!isSubKernel && meta.flowType === 'ep' && (
                                   <div className="divide-y divide-slate-200">
                                     {db.fireServices.map((f) => {
                                       const st = dealerBatchState[f.id] || {
@@ -5224,7 +5719,160 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
 
                               {/* Desktop Wide Table with Auto-Enlarging Cells on Focus */}
                               <div className="hidden lg:block overflow-x-auto">
-                                {meta.flowType === 'dealer_food' && (
+                                {isSubKernel && (
+                                  <table className="w-full text-xs border-collapse tabular-nums">
+                                    <thead>
+                                      <tr className="bg-emerald-50 border-b border-emerald-200 text-emerald-950 font-bold">
+                                        <th className="py-2.5 px-2.5 text-center w-14">
+                                          <label className="inline-flex items-center gap-1 cursor-pointer">
+                                            <input
+                                              type="checkbox"
+                                              checked={
+                                                db.millers.length > 0 &&
+                                                db.millers.every((m) => dealerBatchState[m.id]?.selected)
+                                              }
+                                              onChange={(e) => {
+                                                const checked = e.target.checked;
+                                                setDealerBatchState((prev) => {
+                                                  const next = { ...prev };
+                                                  for (const m of db.millers) {
+                                                    const cur = next[m.id] || {
+                                                      selected: checked,
+                                                      cards: 0,
+                                                      unused: 0,
+                                                      qty: '0.000',
+                                                    };
+                                                    next[m.id] = { ...cur, selected: checked };
+                                                  }
+                                                  return next;
+                                                });
+                                              }}
+                                            />
+                                            <span>সব</span>
+                                          </label>
+                                        </th>
+                                        <th className="py-2.5 px-2.5 text-left">মিল ও ঠিকানা</th>
+                                        <th className="py-2.5 px-2.5 text-left">ডিও প্রাপকের নাম নির্বাচন</th>
+                                        <th className="py-2.5 px-2.5 text-right min-w-[150px] w-44">পরিমাণ (মে.টন)</th>
+                                        <th className="py-2.5 px-2.5 text-right">মোট টাকা</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-100">
+                                      {db.millers.length === 0 ? (
+                                        <tr>
+                                          <td colSpan={5} className="py-6 text-center text-slate-500">
+                                            কোনো মিলার পাওয়া যায়নি। সেটিংস → মাস্টার ডাটা → মিলার (কার্নেল) থেকে মিলার যোগ করুন।
+                                          </td>
+                                        </tr>
+                                      ) : (
+                                        db.millers.map((m) => {
+                                          const st = dealerBatchState[m.id] || {
+                                            selected: false,
+                                            cards: 0,
+                                            unused: 0,
+                                            qty: '0.000',
+                                          };
+                                          const activeRole = millerRoles[m.id] || m.recipientRole || 'mill';
+                                          const resolvedName = getMillerRecipientName(m, activeRole);
+                                          const prevAlloc =
+                                            dealerAlreadyAllocatedOnMemo.get(
+                                              resolvedName.trim().toLowerCase()
+                                            ) || 0;
+                                          const isRowActive = activeDealerCell?.rowId === m.id;
+                                          return (
+                                            <tr
+                                              key={m.id}
+                                              className={
+                                                isRowActive
+                                                  ? 'bg-rose-50/40'
+                                                  : st.selected
+                                                    ? 'bg-white'
+                                                    : 'bg-slate-50/60'
+                                              }
+                                            >
+                                              <td className="py-2 px-2.5 text-center">
+                                                <input
+                                                  type="checkbox"
+                                                  checked={st.selected}
+                                                  onChange={(e) =>
+                                                    setDealerBatchState((prev) => ({
+                                                      ...prev,
+                                                      [m.id]: { ...st, selected: e.target.checked },
+                                                    }))
+                                                  }
+                                                />
+                                              </td>
+                                              <td className="py-2 px-2.5">
+                                                <div className="font-bold text-slate-900">
+                                                  {m.millName || m.millerName}
+                                                </div>
+                                                <div className="text-[11px] text-slate-500">
+                                                  {m.unionName || '—'}
+                                                  {m.address ? ` · ${m.address}` : ''}
+                                                  {m.mobile ? ` · ${toBnDigits(m.mobile)}` : ''}
+                                                </div>
+                                                {prevAlloc > 0 && (
+                                                  <div className="text-[10.5px] font-semibold text-emerald-700">
+                                                    এই স্মারকে পূর্বে বরাদ্দ: {formatBnQty(prevAlloc)} মে.টন
+                                                  </div>
+                                                )}
+                                              </td>
+                                              <td className="py-2 px-2.5">
+                                                <select
+                                                  value={activeRole}
+                                                  onChange={(e) =>
+                                                    setMillerRoles((prev) => ({
+                                                      ...prev,
+                                                      [m.id]: e.target.value as MillerRecipientRole,
+                                                    }))
+                                                  }
+                                                  className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-bold text-slate-900"
+                                                >
+                                                  <option value="mill">মিলের নাম: {m.millName || m.millerName}</option>
+                                                  <option value="miller">মিলারের নাম: {m.millerName || m.millName}</option>
+                                                  {m.ownerName && <option value="owner">মিল মালিক: {m.ownerName}</option>}
+                                                  {m.representativeName && (
+                                                    <option value="representative">প্রতিনিধি: {m.representativeName}</option>
+                                                  )}
+                                                </select>
+                                              </td>
+                                              <td className="py-2 px-2">
+                                                <input
+                                                  type="number"
+                                                  step="0.001"
+                                                  value={st.qty}
+                                                  onFocus={() =>
+                                                    setActiveDealerCell({ rowId: m.id, field: 'qty' })
+                                                  }
+                                                  onBlur={() =>
+                                                    setActiveDealerCell((cur) =>
+                                                      cur?.rowId === m.id ? null : cur
+                                                    )
+                                                  }
+                                                  onChange={(e) =>
+                                                    setDealerBatchState((prev) => ({
+                                                      ...prev,
+                                                      [m.id]: {
+                                                        ...st,
+                                                        selected: true,
+                                                        qty: e.target.value,
+                                                      },
+                                                    }))
+                                                  }
+                                                  className="w-full min-h-[42px] rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-right text-sm font-bold transition-all duration-150 focus:outline-none focus:scale-[1.08] focus:relative focus:z-20 focus:min-w-[152px] focus:border-2 focus:border-[#E2136E] focus:bg-white focus:text-base focus:font-extrabold focus:shadow-lg focus:ring-4 focus:ring-[#E2136E]/20"
+                                                />
+                                              </td>
+                                              <td className="py-2 px-2.5 text-right font-semibold text-emerald-800">
+                                                ০.০০ (কার্নেল)
+                                              </td>
+                                            </tr>
+                                          );
+                                        })
+                                      )}
+                                    </tbody>
+                                  </table>
+                                )}
+                                {!isSubKernel && meta.flowType === 'dealer_food' && (
                                   <table className="w-full text-xs border-collapse tabular-nums">
                                     <thead>
                                       <tr className="bg-slate-50 border-b border-slate-200 text-slate-700 font-bold">
@@ -5429,7 +6077,7 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                                   </table>
                                 )}
 
-                                {meta.flowType === 'dealer_oms' && (
+                                {!isSubKernel && meta.flowType === 'dealer_oms' && (
                                   <table className="w-full text-xs border-collapse tabular-nums">
                                     <thead>
                                       <tr className="bg-slate-50 border-b border-slate-200 text-slate-700 font-bold">
@@ -5450,9 +6098,12 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                                                   for (const d of filteredOmsDealers) {
                                                     const cur = next[d.key] || {
                                                       selected: checked,
-                                                      cards: 0,
+                                                      cards: selectedCategory === 'ওএমএস টিসিবি' ? d.tcbCardCount : 0,
                                                       unused: 0,
-                                                      qty: '1.000',
+                                                      qty:
+                                                        selectedCategory === 'ওএমএস টিসিবি'
+                                                          ? round3(d.tcbCardCount * 0.005).toFixed(3)
+                                                          : '1.000',
                                                     };
                                                     next[d.key] = { ...cur, selected: checked };
                                                   }
@@ -5465,6 +6116,20 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                                         </th>
                                         <th className="py-2.5 px-2.5 text-left">এলাকা ও ইউনিয়ন/পৌরসভা</th>
                                         <th className="py-2.5 px-2.5 text-left">ডিলারের নাম ও কেন্দ্র</th>
+                                        {selectedCategory === 'ওএমএস টিসিবি' ? (
+                                          <>
+                                            <th className="py-2.5 px-2.5 text-center min-w-[110px] w-28">
+                                              টিসিবি কার্ড
+                                            </th>
+                                            <th className="py-2.5 px-2.5 text-center min-w-[110px] w-28">
+                                              অবশিষ্ট কার্ড
+                                            </th>
+                                          </>
+                                        ) : (
+                                          <th className="py-2.5 px-2.5 text-right min-w-[130px] w-36">
+                                            প্রারম্ভিক মজুদ (মে.টন)
+                                          </th>
+                                        )}
                                         <th className="py-2.5 px-2.5 text-right min-w-[140px] w-40">বরাদ্দ (মে.টন)</th>
                                         <th className="py-2.5 px-2.5 text-right">মোট টাকা</th>
                                         {catRate.taxRate > 0 && (
@@ -5476,7 +6141,10 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                                       {filteredOmsDealers.length === 0 ? (
                                         <tr>
                                           <td
-                                            colSpan={catRate.taxRate > 0 ? 6 : 5}
+                                            colSpan={
+                                              (selectedCategory === 'ওএমএস টিসিবি' ? 7 : 6) +
+                                              (catRate.taxRate > 0 ? 1 : 0)
+                                            }
                                             className="py-6 text-center text-slate-500"
                                           >
                                             কোনো ডিলার পাওয়া যায়নি। সেটিংস থেকে ডিলার তালিকা যোগ করুন।
@@ -5484,11 +6152,15 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                                         </tr>
                                       ) : (
                                         filteredOmsDealers.map((d) => {
+                                          const isTcbCat = selectedCategory === 'ওএমএস টিসিবি';
                                           const st = dealerBatchState[d.key] || {
                                             selected: false,
-                                            cards: 0,
+                                            cards: isTcbCat ? d.tcbCardCount : 0,
                                             unused: 0,
-                                            qty: '1.000',
+                                            qty: isTcbCat
+                                              ? round3(d.tcbCardCount * 0.005).toFixed(3)
+                                              : '1.000',
+                                            openingStockMt: '',
                                           };
                                           const q = parseNum(st.qty);
                                           const prevAlloc =
@@ -5526,7 +6198,7 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                                                     ? d.municipality
                                                     : d.unionName}
                                                 </div>
-                                                {selectedCategory === 'ওএমএস টিসিবি' && (
+                                                {isTcbCat && (
                                                   <span
                                                     className={`inline-block mt-0.5 rounded px-1.5 py-0.5 text-[10px] font-bold ${
                                                       d.dealerKind === 'খাদ্য বান্ধব'
@@ -5552,6 +6224,97 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                                                   </div>
                                                 )}
                                               </td>
+                                              {isTcbCat ? (
+                                                <>
+                                                  <td className="py-2 px-2">
+                                                    <input
+                                                      type="number"
+                                                      value={st.cards}
+                                                      onFocus={() =>
+                                                        setActiveDealerCell({ rowId: d.key, field: 'cards' })
+                                                      }
+                                                      onBlur={() =>
+                                                        setActiveDealerCell((cur) =>
+                                                          cur?.rowId === d.key ? null : cur
+                                                        )
+                                                      }
+                                                      onChange={(e) => {
+                                                        const cards = Math.max(0, parseNum(e.target.value));
+                                                        const effQty = round3(
+                                                          Math.max(0, cards - st.unused) * 0.005
+                                                        ).toFixed(3);
+                                                        setDealerBatchState((prev) => ({
+                                                          ...prev,
+                                                          [d.key]: {
+                                                            ...st,
+                                                            selected: cards > 0,
+                                                            cards,
+                                                            qty: effQty,
+                                                          },
+                                                        }));
+                                                      }}
+                                                      className="w-full min-h-[42px] rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-center text-sm font-bold"
+                                                    />
+                                                  </td>
+                                                  <td className="py-2 px-2">
+                                                    <input
+                                                      type="number"
+                                                      value={st.unused}
+                                                      onFocus={() =>
+                                                        setActiveDealerCell({ rowId: d.key, field: 'unused' })
+                                                      }
+                                                      onBlur={() =>
+                                                        setActiveDealerCell((cur) =>
+                                                          cur?.rowId === d.key ? null : cur
+                                                        )
+                                                      }
+                                                      onChange={(e) => {
+                                                        const unused = Math.max(0, parseNum(e.target.value));
+                                                        const effQty = round3(
+                                                          Math.max(0, st.cards - unused) * 0.005
+                                                        ).toFixed(3);
+                                                        setDealerBatchState((prev) => ({
+                                                          ...prev,
+                                                          [d.key]: {
+                                                            ...st,
+                                                            unused,
+                                                            qty: effQty,
+                                                          },
+                                                        }));
+                                                      }}
+                                                      className="w-full min-h-[42px] rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-center text-sm font-bold"
+                                                    />
+                                                  </td>
+                                                </>
+                                              ) : (
+                                                <td className="py-2 px-2">
+                                                  <input
+                                                    type="number"
+                                                    step="0.001"
+                                                    min="0"
+                                                    value={st.openingStockMt ?? ''}
+                                                    placeholder="০.০০০"
+                                                    onFocus={() =>
+                                                      setActiveDealerCell({ rowId: d.key, field: 'opening' })
+                                                    }
+                                                    onBlur={() =>
+                                                      setActiveDealerCell((cur) =>
+                                                        cur?.rowId === d.key ? null : cur
+                                                      )
+                                                    }
+                                                    onChange={(e) =>
+                                                      setDealerBatchState((prev) => ({
+                                                        ...prev,
+                                                        [d.key]: {
+                                                          ...st,
+                                                          openingStockMt: e.target.value,
+                                                        },
+                                                      }))
+                                                    }
+                                                    className="w-full min-h-[42px] rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-right text-sm font-bold"
+                                                  />
+                                                </td>
+                                              )}
                                               <td className="py-2 px-2">
                                                 <input
                                                   type="number"
@@ -5594,7 +6357,7 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                                   </table>
                                 )}
 
-                                {meta.flowType === 'ep' && (
+                                {!isSubKernel && meta.flowType === 'ep' && (
                                   <table className="w-full text-xs border-collapse tabular-nums">
                                     <thead>
                                       <tr className="bg-slate-50 border-b border-slate-200 text-slate-700 font-bold">
@@ -6767,6 +7530,7 @@ export const CategoryEntryView: React.FC<CategoryEntryViewProps> = ({
                   onIssueDOBatch={onIssueDOBatch!}
                   onUpdateDOIssue={onUpdateDOIssue}
                   onDeleteDOIssue={onDeleteDOIssue!}
+                  onRelinkChallan={onRelinkChallan}
                 />
               </div>
             )}

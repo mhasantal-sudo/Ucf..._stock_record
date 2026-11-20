@@ -40,6 +40,8 @@ import {
   type ChairmanEntry,
   type FireServiceEntry,
   type FoodDealer,
+  type MillerEntry,
+  type MillerRecipientRole,
   type OMSDealer,
   type OfficerProfileSettings,
   type RegisterId,
@@ -109,10 +111,15 @@ interface AllocationSettingsViewProps {
   onDeleteFoodDealer: (id: string) => void;
   onSaveOMSDealer: (d: Omit<OMSDealer, 'id'>, existingId?: string) => void;
   onDeleteOMSDealer: (id: string) => void;
+  onUpdateDealerTcbCards?: (
+    updates: Array<{ kind: 'food' | 'oms'; id: string; tcbCardCount: number }>
+  ) => void;
   onSaveChairman: (c: Omit<ChairmanEntry, 'id'>, existingId?: string) => void;
   onDeleteChairman: (id: string) => void;
   onSaveFireService: (f: Omit<FireServiceEntry, 'id'>, existingId?: string) => void;
   onDeleteFireService: (id: string) => void;
+  onSaveMiller: (m: Omit<MillerEntry, 'id'>, existingId?: string) => void;
+  onDeleteMiller: (id: string) => void;
   onSaveRate: (cat: AllocationCategory, unitPrice: number, taxRate: number) => void;
   onExportBackup: () => void;
   onImportBackup: (jsonText: string) => ActionResult;
@@ -236,12 +243,47 @@ const REPORT_DEFAULT_COLUMNS: Record<string, Array<{ key: string; label: string 
     { key: 'serial', label: 'ক্রমিক' },
     { key: 'center', label: 'বিক্রয় কেন্দ্র' },
     { key: 'dealer', label: 'ডিলারের নাম' },
-    { key: 'mobile', label: 'মোবাইল' },
     { key: 'cards', label: 'কার্ড' },
-    { key: 'qty', label: 'পরিমাণ (কার্নেল ছাড়া প্রিন্টে)' },
-    { key: 'qtyWithoutKernel', label: 'কার্নেল ছাড়া পরিমাণ' },
-    { key: 'kernelQty', label: 'কার্নেল' },
-    { key: 'qtyWithKernel', label: 'কার্নেল সহ পরিমাণ' },
+    { key: 'totalRice', label: 'চালের পরিমাণ (মে.টন)' },
+    { key: 'openingStock', label: 'প্রারম্ভিক মজুদ (মে.টন)' },
+    { key: 'qtyWithoutKernel', label: 'চলতি মাসের বরাদ্দের পরিমাণ (মে.টন)' },
+    { key: 'qty', label: 'চলতি মাসের বরাদ্দের পরিমাণ (কার্নেল ছাড়া)' },
+    { key: 'kernelQty', label: 'বরাদ্দকৃত কার্নেলের পরিমাণ (মে.টন)' },
+    { key: 'qtyWithKernel', label: 'কার্নেলসহ মোট বরাদ্দের পরিমাণ (মে.টন)' },
+    { key: 'amount', label: 'টাকা' },
+    { key: 'tax', label: 'আয়কর' },
+  ],
+  'alloc-oms-tcb': [
+    { key: 'serial', label: 'ক্রমিক নং' },
+    { key: 'union', label: 'ইউনিয়ন / পৌরসভার নাম' },
+    { key: 'dealer', label: 'মনোনীত খাদ্যবান্ধব / ওএমএস ডিলারের নাম' },
+    { key: 'cards', label: 'এক্টিভেটেড কার্ড সংখ্যা' },
+    { key: 'rice5kg', label: '৫ কেজি হারে চালের পরিমাণ (মে. টন)' },
+    { key: 'openingStock', label: 'প্রারম্ভিক মজুদ (মে. টন)' },
+    { key: 'qty', label: 'চলতি মাসের বরাদ্দের পরিমাণ (মে. টন)' },
+    { key: 'amount', label: 'চালের মোট মূল্য (টাকা)' },
+    { key: 'tax', label: 'আয়কর (টাকা)' },
+    { key: 'comment', label: 'মন্তব্য' },
+  ],
+  'alloc-oms-spc': [
+    { key: 'union', label: 'ইউনিয়ন / পৌরসভা' },
+    { key: 'serial', label: 'ক্রমিক' },
+    { key: 'center', label: 'বিক্রয় কেন্দ্র' },
+    { key: 'dealer', label: 'ডিলারের নাম' },
+    { key: 'totalRice', label: 'চালের পরিমাণ (মে.টন)' },
+    { key: 'openingStock', label: 'প্রারম্ভিক মজুদ (মে.টন)' },
+    { key: 'qty', label: 'বরাদ্দের পরিমাণ (মে.টন)' },
+    { key: 'amount', label: 'টাকা' },
+    { key: 'tax', label: 'আয়কর' },
+  ],
+  'alloc-oms-gen': [
+    { key: 'union', label: 'ইউনিয়ন / পৌরসভা' },
+    { key: 'serial', label: 'ক্রমিক' },
+    { key: 'center', label: 'বিক্রয় কেন্দ্র' },
+    { key: 'dealer', label: 'ডিলারের নাম' },
+    { key: 'totalRice', label: 'চালের পরিমাণ (মে.টন)' },
+    { key: 'openingStock', label: 'প্রারম্ভিক মজুদ (মে.টন)' },
+    { key: 'qty', label: 'বরাদ্দের পরিমাণ (মে.টন)' },
     { key: 'amount', label: 'টাকা' },
     { key: 'tax', label: 'আয়কর' },
   ],
@@ -330,10 +372,13 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
   onDeleteFoodDealer,
   onSaveOMSDealer,
   onDeleteOMSDealer,
+  onUpdateDealerTcbCards,
   onSaveChairman,
   onDeleteChairman,
   onSaveFireService,
   onDeleteFireService,
+  onSaveMiller,
+  onDeleteMiller,
   onSaveRate,
   onExportBackup,
   onImportBackup,
@@ -383,11 +428,18 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
   const [sigIsDrawing, setSigIsDrawing] = useState(false);
 
   // Master sub-tab & quick add forms
-  const [masterTab, setMasterTab] = useState<'food' | 'oms' | 'chairmen' | 'fire' | 'rates'>('food');
+  const [masterTab, setMasterTab] = useState<
+    'food' | 'oms' | 'tcb' | 'chairmen' | 'fire' | 'millers' | 'rates'
+  >('food');
+  const [tcbDrafts, setTcbDrafts] = useState<Record<string, string>>({});
   const [editingFoodId, setEditingFoodId] = useState<string | null>(null);
   const [editingOmsId, setEditingOmsId] = useState<string | null>(null);
   const [editingChairmanId, setEditingChairmanId] = useState<string | null>(null);
   const [editingFireId, setEditingFireId] = useState<string | null>(null);
+  const [editingMillerId, setEditingMillerId] = useState<string | null>(null);
+  const [templateTargetField, setTemplateTargetField] = useState<
+    'subject' | 'introText' | 'conditionsText' | 'copyMemoText' | 'copyList' | 'signLines' | 'copySignLines'
+  >('introText');
   const [newFood, setNewFood] = useState({
     dealerName: '',
     fatherName: '',
@@ -421,6 +473,27 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
     divisionName: 'বরিশাল',
     riceRate: '2000',
     wheatRate: '1800',
+  });
+  const [newMiller, setNewMiller] = useState<{
+    millerName: string;
+    millName: string;
+    ownerName: string;
+    representativeName: string;
+    recipientRole: MillerRecipientRole;
+    mobile: string;
+    unionName: string;
+    address: string;
+    licenseNo: string;
+  }>({
+    millerName: '',
+    millName: '',
+    ownerName: '',
+    representativeName: '',
+    recipientRole: 'mill',
+    mobile: '',
+    unionName: db.officer.unions[0] || '',
+    address: '',
+    licenseNo: '',
   });
   const [rateEdits, setRateEdits] = useState<Record<string, { unitPrice: string; taxRate: string }>>({});
 
@@ -1638,7 +1711,7 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
               </button>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 text-xs">
               <div>
                 <label className="block font-bold text-slate-700 mb-1">সরকারি শিরোনাম</label>
                 <input
@@ -1667,7 +1740,16 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
                 />
               </div>
               <div>
-                <label className="block font-bold text-slate-700 mb-1">রিপোর্ট শিরোনাম</label>
+                <label className="block font-bold text-slate-700 mb-1">অফিস লাইন ৩ (স্থান)</label>
+                <input
+                  type="text"
+                  value={activeTemplate.office3 ?? ''}
+                  onChange={(e) => onUpdateTemplate(selectedTemplateId, { office3: e.target.value })}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-1.5"
+                />
+              </div>
+              <div className="sm:col-span-2">
+                <label className="block font-bold text-slate-700 mb-1">রিপোর্ট শিরোনাম (যেমন: অফিস আদেশ / মাসিক বিতরণ)</label>
                 <input
                   type="text"
                   value={activeTemplate.reportTitle}
@@ -1677,12 +1759,67 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
               </div>
             </div>
 
+            <div className="rounded-xl border border-rose-200 bg-rose-50/40 p-2.5 space-y-2 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-bold text-slate-800">
+                  চিঠির স্বয়ংক্রিয় তথ্য ও বক্স যোগ করুন (ক্লিক করলে নির্ধারিত ঘরে বসবে):
+                </span>
+                <select
+                  value={templateTargetField}
+                  onChange={(e) => setTemplateTargetField(e.target.value as typeof templateTargetField)}
+                  className="rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-[11px] font-bold text-slate-800"
+                >
+                  <option value="introText">সূচনা বক্তব্য (Intro Text)</option>
+                  <option value="conditionsText">শর্তাবলি / নির্দেশনা</option>
+                  <option value="subject">বিষয় (Subject)</option>
+                  <option value="copyMemoText">অনুলিপির স্মারক</option>
+                  <option value="copyList">অনুলিপি তালিকা</option>
+                  <option value="signLines">স্বাক্ষর ব্লক</option>
+                  <option value="copySignLines">অনুলিপির স্বাক্ষর ব্লক</option>
+                </select>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {[
+                  '{মাস}',
+                  '{বছর}',
+                  '{মন্ত্রণালয়_তারিখ}',
+                  '{মন্ত্রণালয়_স্মারক}',
+                  '{ডিসি_তারিখ}',
+                  '{ডিসি_স্মারক}',
+                  '{ডিএফসি_মাস}',
+                  '{ডিএফসি_তারিখ}',
+                  '{ডিএফসি_স্মারক}',
+                  '{মাস_বক্স}',
+                  '{শেষ_তারিখ}',
+                  '{স্মারক_শেষ}',
+                  '{তারিখ_বক্স}',
+                  '{বঙ্গাব্দ}',
+                  '{মিল_মালিক}',
+                ].map((token) => (
+                  <button
+                    key={token}
+                    type="button"
+                    onClick={() => {
+                      const cur = String(activeTemplate[templateTargetField] ?? '');
+                      onUpdateTemplate(selectedTemplateId, {
+                        [templateTargetField]: cur ? `${cur}${cur.endsWith(' ') || cur.endsWith('\n') ? '' : ' '}${token}` : token,
+                      });
+                    }}
+                    className="rounded-lg border border-rose-300 bg-white hover:bg-rose-50 px-2 py-0.5 text-[11px] font-bold text-[#E2136E] cursor-pointer"
+                  >
+                    + {token}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
               <div className="sm:col-span-2">
                 <label className="block font-bold text-slate-700 mb-1">বিষয় (Subject)</label>
                 <input
                   type="text"
                   value={activeTemplate.subject}
+                  onFocus={() => setTemplateTargetField('subject')}
                   onChange={(e) => onUpdateTemplate(selectedTemplateId, { subject: e.target.value })}
                   className="w-full rounded-lg border border-slate-300 px-3 py-1.5"
                 />
@@ -1698,7 +1835,37 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
               </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">সূচনা বক্তব্য (Intro Text)</label>
+                <textarea
+                  rows={4}
+                  value={activeTemplate.introText}
+                  onFocus={() => setTemplateTargetField('introText')}
+                  onChange={(e) =>
+                    onUpdateTemplate(selectedTemplateId, { introText: e.target.value })
+                  }
+                  className="w-full rounded-lg border border-slate-300 px-3 py-1.5"
+                />
+              </div>
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">
+                  শর্তাবলি / ছকের নিচের নির্দেশনা (স্বাক্ষরের উপরে বসবে)
+                </label>
+                <textarea
+                  rows={4}
+                  value={activeTemplate.conditionsText ?? ''}
+                  onFocus={() => setTemplateTargetField('conditionsText')}
+                  onChange={(e) =>
+                    onUpdateTemplate(selectedTemplateId, { conditionsText: e.target.value })
+                  }
+                  placeholder="শর্তাবলি: (ঐচ্ছিক, প্রতিটি শর্ত নতুন লাইনে লিখুন)"
+                  className="w-full rounded-lg border border-slate-300 px-3 py-1.5"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
               <div>
                 <label className="block font-bold text-slate-700 mb-1">প্রাপক (প্রতি লাইন আলাদা)</label>
                 <textarea
@@ -1711,21 +1878,11 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
                 />
               </div>
               <div>
-                <label className="block font-bold text-slate-700 mb-1">সূচনা বক্তব্য (Intro Text)</label>
-                <textarea
-                  rows={3}
-                  value={activeTemplate.introText}
-                  onChange={(e) =>
-                    onUpdateTemplate(selectedTemplateId, { introText: e.target.value })
-                  }
-                  className="w-full rounded-lg border border-slate-300 px-3 py-1.5"
-                />
-              </div>
-              <div>
                 <label className="block font-bold text-slate-700 mb-1">মূল ছকের নিচের স্বাক্ষর ব্লক</label>
                 <textarea
                   rows={3}
                   value={activeTemplate.signLines}
+                  onFocus={() => setTemplateTargetField('signLines')}
                   onChange={(e) =>
                     onUpdateTemplate(selectedTemplateId, { signLines: e.target.value })
                   }
@@ -1739,11 +1896,22 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="font-bold text-slate-900">অনুলিপি ও স্মারক বিন্যাস</div>
                 <div className="text-[11px] text-slate-600">
-                  ক্রম: মূল ছকের নিচে স্বাক্ষর → অনুলিপির উপরে স্মারক → অনুলিপি তালিকা → নিচে কর্মকর্তা, পদবি ও স্থান
+                  ক্রম: মূল ছকের নিচে শর্তাবলি ও স্বাক্ষর → অনুলিপির উপরে স্মারক → অনুলিপি তালিকা → নিচে কর্মকর্তা, পদবি ও স্থান
                 </div>
               </div>
 
               <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+                <label className="inline-flex items-center gap-2 font-bold text-slate-800 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(activeTemplate.hideTopMemoRow)}
+                    onChange={(e) =>
+                      onUpdateTemplate(selectedTemplateId, { hideTopMemoRow: e.target.checked })
+                    }
+                  />
+                  <span>শীর্ষের স্মারক সারি লুকান (অফিস আদেশ/বরাদ্দাদেশের জন্য)</span>
+                </label>
+
                 <label className="inline-flex items-center gap-2 font-bold text-slate-800 cursor-pointer">
                   <input
                     type="checkbox"
@@ -2428,8 +2596,15 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
               [
                 { key: 'food', label: `খাদ্য বান্ধব ডিলার (${formatBnInt(db.foodDealers.length)})` },
                 { key: 'oms', label: `ওএমএস ডিলার (${formatBnInt(db.omsDealers.length)})` },
+                {
+                  key: 'tcb',
+                  label: `টিসিবি কার্ড (ওএমএস টিসিবি) (${formatBnInt(
+                    db.omsDealers.length + db.foodDealers.length
+                  )})`,
+                },
                 { key: 'chairmen', label: `চেয়ারম্যান (${formatBnInt(db.chairmen.length)})` },
                 { key: 'fire', label: `ফায়ার সার্ভিস (${formatBnInt(db.fireServices.length)})` },
+                { key: 'millers', label: `মিলার (কার্নেল) (${formatBnInt(db.millers.length)})` },
                 { key: 'rates', label: `খাতভিত্তিক দর ও আয়কর (${formatBnInt(db.rates.length)})` },
               ] as const
             ).map((m) => (
@@ -2460,6 +2635,7 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
                     {
                       ...newFood,
                       cardCount: parseNum(newFood.cardCount),
+                      tcbCardCount: existing?.tcbCardCount,
                       totalQty: existing?.totalQty || 0,
                       poDate: existing?.poDate || '',
                       amount: existing?.amount || 0,
@@ -2616,6 +2792,7 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
                   onSaveOMSDealer(
                     {
                       ...newOms,
+                      tcbCardCount: existing?.tcbCardCount,
                       fatherName: existing?.fatherName || '',
                       nid: existing?.nid || '',
                       poNo: existing?.poNo || '',
@@ -2771,6 +2948,126 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
                         </td>
                       </tr>
                     ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {masterTab === 'tcb' && (
+            <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-3 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2 bg-violet-50/70 border border-violet-200 rounded-xl p-3">
+                <div>
+                  <div className="font-bold text-slate-900">
+                    ওএমএস (টিসিবি) কার্ড সংখ্যা সেট করুন — প্রতি কার্ডে ৫ কেজি (০.০০৫ মে.টন) হারে হিসাব
+                  </div>
+                  <div className="text-[11px] text-slate-600 mt-0.5">
+                    এই কার্ড সংখ্যা কেবলমাত্র «ওএমএস টিসিবি» খাতের জন্য প্রযোজ্য; খাদ্য বান্ধব ডিলারের ৩০ কেজি কার্ড সংখ্যার ওপর কোনো প্রভাব ফেলবে না।
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!onUpdateDealerTcbCards) return;
+                    const updates: Array<{ kind: 'food' | 'oms'; id: string; tcbCardCount: number }> = [
+                      ...db.omsDealers.map((d) => {
+                        const raw = tcbDrafts[`oms:${d.id}`];
+                        const val =
+                          raw !== undefined ? Math.max(0, Math.round(parseNum(raw))) : Math.max(0, d.tcbCardCount || 0);
+                        return { kind: 'oms' as const, id: d.id, tcbCardCount: val };
+                      }),
+                      ...db.foodDealers.map((d) => {
+                        const raw = tcbDrafts[`food:${d.id}`];
+                        const val =
+                          raw !== undefined ? Math.max(0, Math.round(parseNum(raw))) : Math.max(0, d.tcbCardCount || 0);
+                        return { kind: 'food' as const, id: d.id, tcbCardCount: val };
+                      }),
+                    ];
+                    onUpdateDealerTcbCards(updates);
+                    setFeedback({ ok: true, text: 'টিসিবি কার্ড সংখ্যা সফলভাবে সংরক্ষিত হয়েছে।' });
+                  }}
+                  className="min-h-[38px] rounded-xl bg-[#E2136E] hover:bg-[#B80D58] text-white font-bold px-4 py-1.5 cursor-pointer"
+                >
+                  টিসিবি কার্ড সংরক্ষণ করুন
+                </button>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full border-collapse tabular-nums">
+                  <thead>
+                    <tr className="bg-slate-50 border-b border-slate-200 font-bold text-slate-700">
+                      <th className="py-2 px-3 text-left">ধরন</th>
+                      <th className="py-2 px-3 text-left">ইউনিয়ন / পৌরসভা</th>
+                      <th className="py-2 px-3 text-left">ডিলারের নাম ও বিক্রয় কেন্দ্র</th>
+                      <th className="py-2 px-3 text-center w-36">টিসিবি কার্ড সংখ্যা</th>
+                      <th className="py-2 px-3 text-right">৫ কেজি হারে চাল (মে.টন)</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {[
+                      ...db.omsDealers.map((d) => ({
+                        key: `oms:${d.id}`,
+                        kindLabel: 'ওএমএস',
+                        area: d.areaType === 'পৌরসভা' ? d.municipality : d.unionName,
+                        dealerName: d.dealerName,
+                        salesCenter: d.salesCenter,
+                        savedCards: Math.max(0, d.tcbCardCount || 0),
+                      })),
+                      ...db.foodDealers.map((d) => ({
+                        key: `food:${d.id}`,
+                        kindLabel: 'খাদ্য বান্ধব',
+                        area: d.unionName,
+                        dealerName: d.dealerName,
+                        salesCenter: d.salesCenter,
+                        savedCards: Math.max(0, d.tcbCardCount || 0),
+                      })),
+                    ].map((row) => {
+                      const raw = tcbDrafts[row.key];
+                      const cardsVal =
+                        raw !== undefined
+                          ? Math.max(0, Math.round(parseNum(raw)))
+                          : row.savedCards;
+                      const riceMt = Math.round(cardsVal * 0.005 * 1000) / 1000;
+                      return (
+                        <tr key={row.key}>
+                          <td className="py-2 px-3">
+                            <span
+                              className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-bold ${
+                                row.kindLabel === 'খাদ্য বান্ধব'
+                                  ? 'bg-rose-50 text-[#E2136E] border border-rose-200'
+                                  : 'bg-sky-50 text-sky-700 border border-sky-200'
+                              }`}
+                            >
+                              {row.kindLabel}
+                            </span>
+                          </td>
+                          <td className="py-2 px-3">{row.area || '—'}</td>
+                          <td className="py-2 px-3 font-bold">
+                            {row.dealerName}{' '}
+                            {row.salesCenter && (
+                              <span className="font-normal text-slate-500">({row.salesCenter})</span>
+                            )}
+                          </td>
+                          <td className="py-1.5 px-3 text-center">
+                            <input
+                              type="number"
+                              min="0"
+                              value={raw !== undefined ? raw : String(row.savedCards)}
+                              onChange={(e) =>
+                                setTcbDrafts((prev) => ({
+                                  ...prev,
+                                  [row.key]: e.target.value,
+                                }))
+                              }
+                              className="w-28 rounded border border-slate-300 bg-white px-2.5 py-1 text-center font-bold"
+                            />
+                          </td>
+                          <td className="py-2 px-3 text-right font-bold text-slate-900">
+                            {formatBnQty(riceMt)}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -3027,6 +3324,248 @@ export const AllocationSettingsView: React.FC<AllocationSettingsViewProps> = ({
                   ))}
                 </tbody>
               </table>
+            </div>
+          )}
+
+          {masterTab === 'millers' && (
+            <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-3 text-xs">
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 px-3 py-2 text-[11px] text-emerald-950 font-semibold">
+                কার্নেল বরাদ্দের উপবরাদ্দ ও ডিও ইস্যুর সময় নিচের তালিকা থেকে মিলার / মিল / মালিক / প্রতিনিধি প্রদর্শিত হবে। কোনো টাকা বা চালানের প্রয়োজন হবে না।
+              </div>
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (!newMiller.millerName.trim() && !newMiller.millName.trim()) {
+                    setFeedback({ ok: false, text: 'মিলার বা মিলের নাম লিখুন।' });
+                    return;
+                  }
+                  onSaveMiller(
+                    {
+                      millerName: newMiller.millerName.trim() || newMiller.millName.trim(),
+                      millName: newMiller.millName.trim() || newMiller.millerName.trim(),
+                      ownerName: newMiller.ownerName.trim(),
+                      representativeName: newMiller.representativeName.trim(),
+                      recipientRole: newMiller.recipientRole,
+                      mobile: newMiller.mobile.trim(),
+                      unionName: newMiller.unionName.trim(),
+                      address: newMiller.address.trim(),
+                      licenseNo: newMiller.licenseNo.trim(),
+                    },
+                    editingMillerId || undefined
+                  );
+                  setFeedback({
+                    ok: true,
+                    text: editingMillerId ? 'মিলার তথ্য আপডেট হয়েছে।' : 'নতুন মিলার তালিকাভুক্ত হয়েছে।',
+                  });
+                  setEditingMillerId(null);
+                  setNewMiller((p) => ({
+                    ...p,
+                    millerName: '',
+                    millName: '',
+                    ownerName: '',
+                    representativeName: '',
+                    mobile: '',
+                    address: '',
+                    licenseNo: '',
+                  }));
+                }}
+                className="grid grid-cols-2 sm:grid-cols-5 gap-2 bg-slate-50 p-3 rounded-xl border border-slate-200"
+              >
+                <input
+                  value={newMiller.millName}
+                  onChange={(e) => setNewMiller((p) => ({ ...p, millName: e.target.value }))}
+                  placeholder="মিলের নাম *"
+                  className="rounded border border-slate-300 bg-white px-2.5 py-1.5"
+                />
+                <input
+                  value={newMiller.millerName}
+                  onChange={(e) => setNewMiller((p) => ({ ...p, millerName: e.target.value }))}
+                  placeholder="মিলারের নাম *"
+                  className="rounded border border-slate-300 bg-white px-2.5 py-1.5"
+                />
+                <input
+                  value={newMiller.ownerName}
+                  onChange={(e) => setNewMiller((p) => ({ ...p, ownerName: e.target.value }))}
+                  placeholder="মিল মালিকের নাম"
+                  className="rounded border border-slate-300 bg-white px-2.5 py-1.5"
+                />
+                <input
+                  value={newMiller.representativeName}
+                  onChange={(e) => setNewMiller((p) => ({ ...p, representativeName: e.target.value }))}
+                  placeholder="প্রতিনিধির নাম"
+                  className="rounded border border-slate-300 bg-white px-2.5 py-1.5"
+                />
+                <select
+                  value={newMiller.recipientRole}
+                  onChange={(e) =>
+                    setNewMiller((p) => ({ ...p, recipientRole: e.target.value as MillerRecipientRole }))
+                  }
+                  className="rounded border border-slate-300 bg-white px-2.5 py-1.5 font-semibold"
+                  title="ডিও তে যে নাম ডিফল্ট হিসেবে দেখাবে"
+                >
+                  <option value="mill">ডিও নাম: মিলের নাম</option>
+                  <option value="miller">ডিও নাম: মিলারের নাম</option>
+                  <option value="owner">ডিও নাম: মিল মালিক</option>
+                  <option value="representative">ডিও নাম: প্রতিনিধি</option>
+                </select>
+                <input
+                  value={newMiller.mobile}
+                  onChange={(e) => setNewMiller((p) => ({ ...p, mobile: e.target.value }))}
+                  placeholder="মোবাইল"
+                  className="rounded border border-slate-300 bg-white px-2.5 py-1.5"
+                />
+                <select
+                  value={newMiller.unionName}
+                  onChange={(e) => setNewMiller((p) => ({ ...p, unionName: e.target.value }))}
+                  className="rounded border border-slate-300 bg-white px-2.5 py-1.5"
+                >
+                  <option value="">-- ইউনিয়ন / এলাকা --</option>
+                  {Array.from(
+                    new Set([...db.officer.unions, ...(newMiller.unionName ? [newMiller.unionName] : [])])
+                  ).map((u) => (
+                    <option key={u} value={u}>
+                      {u}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  value={newMiller.address}
+                  onChange={(e) => setNewMiller((p) => ({ ...p, address: e.target.value }))}
+                  placeholder="ঠিকানা"
+                  className="rounded border border-slate-300 bg-white px-2.5 py-1.5"
+                />
+                <input
+                  value={newMiller.licenseNo}
+                  onChange={(e) => setNewMiller((p) => ({ ...p, licenseNo: e.target.value }))}
+                  placeholder="লাইসেন্স / রেজিঃ নং"
+                  className="rounded border border-slate-300 bg-white px-2.5 py-1.5"
+                />
+                <div className="flex gap-1">
+                  <button
+                    type="submit"
+                    className="flex-1 inline-flex items-center justify-center gap-1 rounded bg-[#E2136E] hover:bg-[#B80D58] text-white font-bold px-3 py-1.5 cursor-pointer"
+                  >
+                    <Plus className="h-3.5 w-3.5" /> {editingMillerId ? 'আপডেট' : 'যোগ করুন'}
+                  </button>
+                  {editingMillerId && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingMillerId(null);
+                        setNewMiller((p) => ({
+                          ...p,
+                          millerName: '',
+                          millName: '',
+                          ownerName: '',
+                          representativeName: '',
+                          mobile: '',
+                          address: '',
+                          licenseNo: '',
+                        }));
+                      }}
+                      className="rounded border border-slate-300 bg-white px-2 text-slate-600 cursor-pointer"
+                      title="বাতিল"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </div>
+              </form>
+
+              <div className="overflow-x-auto">
+                <table className="w-full border-collapse tabular-nums">
+                  <thead>
+                    <tr className="bg-slate-50 border-b border-slate-200 font-bold text-slate-700">
+                      <th className="py-2 px-3 text-left">মিল ও মিলার</th>
+                      <th className="py-2 px-3 text-left">মালিক / প্রতিনিধি</th>
+                      <th className="py-2 px-3 text-center">ডিফল্ট প্রাপক</th>
+                      <th className="py-2 px-3 text-left">এলাকা ও ঠিকানা</th>
+                      <th className="py-2 px-3 text-center">মোবাইল</th>
+                      <th className="py-2 px-3 text-center">কাজ</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {db.millers.length === 0 ? (
+                      <tr>
+                        <td colSpan={6} className="py-6 text-center text-slate-500">
+                          কোনো মিলার যুক্ত করা হয়নি। উপরের ফরম থেকে মিলার ও মিলের নাম যোগ করুন।
+                        </td>
+                      </tr>
+                    ) : (
+                      db.millers.map((m) => (
+                        <tr key={m.id} className={editingMillerId === m.id ? 'bg-rose-50/50' : ''}>
+                          <td className="py-2 px-3">
+                            <div className="font-bold text-slate-900">{m.millName || m.millerName}</div>
+                            {m.millerName && m.millerName !== m.millName && (
+                              <div className="text-[11px] text-slate-500">মিলার: {m.millerName}</div>
+                            )}
+                            {m.licenseNo && (
+                              <div className="text-[10.5px] text-slate-500">লাইসেন্স: {toBnDigits(m.licenseNo)}</div>
+                            )}
+                          </td>
+                          <td className="py-2 px-3 text-[11px]">
+                            {m.ownerName && <div>মালিক: {m.ownerName}</div>}
+                            {m.representativeName && <div>প্রতিনিধি: {m.representativeName}</div>}
+                            {!m.ownerName && !m.representativeName && <span className="text-slate-400">—</span>}
+                          </td>
+                          <td className="py-2 px-3 text-center">
+                            <span className="inline-block rounded-lg border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10.5px] font-bold text-emerald-900">
+                              {m.recipientRole === 'miller'
+                                ? 'মিলারের নাম'
+                                : m.recipientRole === 'owner'
+                                  ? 'মিল মালিক'
+                                  : m.recipientRole === 'representative'
+                                    ? 'প্রতিনিধি'
+                                    : 'মিলের নাম'}
+                            </span>
+                          </td>
+                          <td className="py-2 px-3">
+                            <div>{m.unionName || '—'}</div>
+                            {m.address && <div className="text-[11px] text-slate-500">{m.address}</div>}
+                          </td>
+                          <td className="py-2 px-3 text-center">{m.mobile ? toBnDigits(m.mobile) : '—'}</td>
+                          <td className="py-2 px-3 text-center whitespace-nowrap">
+                            <div className="inline-flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditingMillerId(m.id);
+                                  setNewMiller({
+                                    millerName: m.millerName,
+                                    millName: m.millName,
+                                    ownerName: m.ownerName || '',
+                                    representativeName: m.representativeName || '',
+                                    recipientRole: m.recipientRole || 'mill',
+                                    mobile: m.mobile || '',
+                                    unionName: m.unionName || '',
+                                    address: m.address || '',
+                                    licenseNo: m.licenseNo || '',
+                                  });
+                                }}
+                                className="text-[#E2136E] hover:bg-rose-50 rounded p-1 cursor-pointer"
+                                title="এডিট করুন"
+                              >
+                                <Pencil className="h-3.5 w-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (editingMillerId === m.id) setEditingMillerId(null);
+                                  onDeleteMiller(m.id);
+                                }}
+                                className="text-rose-600 hover:bg-rose-50 rounded p-1 cursor-pointer"
+                                title="মুছুন"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
             </div>
           )}
 

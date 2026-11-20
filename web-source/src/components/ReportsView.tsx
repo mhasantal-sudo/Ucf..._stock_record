@@ -17,12 +17,14 @@ import {
   Store,
   Users,
 } from 'lucide-react';
+import type {
+  AllocOrderFormFields,
+  AllocationDatabase,
+  ReportTemplateId,
+} from '../types/allocation';
 import {
-  CATEGORIES,
   REPORT_TEMPLATE_CATALOG,
   createDefaultTemplate,
-  type AllocationDatabase,
-  type ReportTemplateId,
 } from '../types/allocation';
 import {
   buildAllocationSummaryReport,
@@ -30,13 +32,17 @@ import {
   buildEPRationReport,
   buildFoodAllocOrderMemos,
   buildFoodAllocOrderRows,
-  buildFoodKernelMemos,
   buildMonthlyDistributionReport,
+  buildOmsAllocOrderMemos,
+  buildOmsAllocOrderRows,
   getDoBookRegisterStats,
   getUnusedDoNumbers,
 } from '../shared/allocReportEngine';
 import {
   BENGALI_MONTHS,
+  autoDeadlineIsoDate,
+  bnToEnDigits,
+  formatBangabdaDate,
   formatBnDate,
   formatBnInt,
   formatBnMoney,
@@ -44,12 +50,30 @@ import {
   isChallanOnOrBeforeDo,
   isSamePartyName,
   normChallanNo,
+  normDoNo,
   normMemoNo,
+  parseMonthYear,
   round2,
   round3,
   toBnDigits,
   todayIsoDate,
 } from '../shared/bnUtils';
+
+function extractMemoSuffix(fullMemo: string, prefix: string): string {
+  const raw = (fullMemo || '').trim();
+  if (!raw) return '';
+  const cleanPrefix = (prefix || '').trim();
+  if (!cleanPrefix) return raw;
+  if (raw.startsWith(cleanPrefix)) {
+    return raw.slice(cleanPrefix.length).trim();
+  }
+  const rawNorm = bnToEnDigits(raw).replace(/\s+/g, '');
+  const preNorm = bnToEnDigits(cleanPrefix).replace(/\s+/g, '');
+  if (preNorm && rawNorm.startsWith(preNorm)) {
+    return raw.replace(/\s+/g, '').slice(preNorm.length).trim();
+  }
+  return raw;
+}
 import {
   OfficialA4Document,
   type DocColumnGroup,
@@ -66,19 +90,23 @@ export type ReportSectionId =
   | 'monthly-cash'
   | 'monthly-ep'
   | 'alloc-food'
+  | 'alloc-oms-gen'
+  | 'alloc-oms-spc'
+  | 'alloc-oms-tcb'
   | 'do-reg-book'
   | 'do-reg-issue'
   | 'do-reg-unused'
   | 'dlr-rep-food'
   | 'dlr-rep-oms';
 
-type ReportParentGroup = 'monthly' | 'dealer' | 'do';
+type ReportParentGroup = 'monthly' | 'orders' | 'dealer' | 'do';
 
 interface ReportsViewProps {
   db: AllocationDatabase;
   activeReportId: ReportSectionId;
   onSelectReport: (id: ReportSectionId) => void;
   onSaveReportMemo: (key: string, no: string, date: string) => void;
+  onSaveAllocOrderForm?: (key: string, form: AllocOrderFormFields) => void;
   onEditTemplate: (tplId: ReportTemplateId) => void;
   onChangeOrientation: (tplId: ReportTemplateId, orientation: 'portrait' | 'landscape') => void;
 }
@@ -102,7 +130,16 @@ const REPORT_PARENT_GROUPS: Array<{
       { id: 'alloc-summary', label: 'বরাদ্দ ও বিতরণ স্থিতি', icon: Layers, bg: 'bg-emerald-50 border-emerald-200', fg: 'text-emerald-700' },
       { id: 'monthly-cash', label: 'নগদ বিক্রয় রিপোর্ট', icon: Coins, bg: 'bg-amber-50 border-amber-200', fg: 'text-amber-700' },
       { id: 'monthly-ep', label: 'ইপি রেশন রিপোর্ট', icon: Flame, bg: 'bg-orange-50 border-orange-200', fg: 'text-orange-700' },
+    ],
+  },
+  {
+    key: 'orders',
+    label: 'বরাদ্দাদেশ',
+    items: [
       { id: 'alloc-food', label: 'খাদ্য বান্ধব বরাদ্দাদেশ', icon: FileSpreadsheet, bg: 'bg-teal-50 border-teal-200', fg: 'text-teal-700' },
+      { id: 'alloc-oms-tcb', label: 'ওএমএস (টিসিবি) বরাদ্দাদেশ', icon: Store, bg: 'bg-violet-50 border-violet-200', fg: 'text-violet-700' },
+      { id: 'alloc-oms-spc', label: 'ওএমএস (বিশেষ) বরাদ্দাদেশ', icon: FileSpreadsheet, bg: 'bg-indigo-50 border-indigo-200', fg: 'text-indigo-700' },
+      { id: 'alloc-oms-gen', label: 'ওএমএস (সাধারণ) বরাদ্দাদেশ', icon: FileSpreadsheet, bg: 'bg-sky-50 border-sky-200', fg: 'text-sky-700' },
     ],
   },
   {
@@ -196,69 +233,61 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
   );
   const [month0, setMonth0] = useState(now.getMonth());
   const [year, setYear] = useState(now.getFullYear());
-  const [catFilter, setCatFilter] = useState('ALL');
   const [selectedFoodMemo, setSelectedFoodMemo] = useState('');
+  const [selectedOmsMemo, setSelectedOmsMemo] = useState('');
   const [foodKernelMode, setFoodKernelMode] = useState<'without_kernel' | 'with_kernel'>('without_kernel');
-  const [selectedKernelMemo, setSelectedKernelMemo] = useState('PERCENT');
-  const [kernelPercentInput, setKernelPercentInput] = useState('1');
-  const [startDate, setStartDate] = useState('');
-  const [endDate, setEndDate] = useState('');
-  const [bookFilter, setBookFilter] = useState('ALL');
 
-  const [doIssueCols, setDoIssueCols] = useState<string[]>([
-    'doNo',
-    'issueDate',
-    'category',
-    'union',
-    'recipient',
-    'unoMemo',
-    'qty',
-    'challan',
-    'signature',
-  ]);
-  const [foodDealerCols, setFoodDealerCols] = useState<string[]>([
-    'unionName',
-    'dealerName',
-    'fatherName',
-    'nid',
-    'mobile',
-    'salesCenter',
-    'cardCount',
-    'totalQty',
-    'poNo',
-    'bankName',
-    'supervisorName',
-  ]);
-  const [omsDealerCols, setOmsDealerCols] = useState<string[]>([
-    'areaType',
-    'unionName',
-    'municipality',
-    'dealerName',
-    'fatherName',
-    'nid',
-    'mobile',
-    'salesCenter',
-    'poNo',
-    'bankName',
-    'amount',
-    'supervisorName',
-  ]);
+  const doIssueCols = useMemo<string[]>(
+    () => [
+      'doNo',
+      'issueDate',
+      'category',
+      'union',
+      'recipient',
+      'unoMemo',
+      'qty',
+      'challan',
+      'signature',
+    ],
+    []
+  );
+  const foodDealerCols = useMemo<string[]>(
+    () => [
+      'unionName',
+      'dealerName',
+      'fatherName',
+      'nid',
+      'mobile',
+      'salesCenter',
+      'cardCount',
+      'totalQty',
+      'poNo',
+      'bankName',
+      'supervisorName',
+    ],
+    []
+  );
+  const omsDealerCols = useMemo<string[]>(
+    () => [
+      'areaType',
+      'unionName',
+      'municipality',
+      'dealerName',
+      'fatherName',
+      'nid',
+      'mobile',
+      'salesCenter',
+      'poNo',
+      'bankName',
+      'amount',
+      'supervisorName',
+    ],
+    []
+  );
 
   useEffect(() => {
     setActiveParent(findGroupForReport(activeReportId));
   }, [activeReportId]);
-
-  const togglePickerCol = (
-    setList: React.Dispatch<React.SetStateAction<string[]>>,
-    key: string
-  ) => {
-    setList((prev) => {
-      if (prev.includes(key)) {
-        return prev.length > 1 ? prev.filter((k) => k !== key) : prev;
-      }
-      return [...prev, key];
-    });
-  };
 
   const template =
     db.templates[activeReportId] ||
@@ -270,7 +299,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
   const colLabel = (key: string, def: string) => template.columnLabels[key]?.trim() || def;
 
   const pendingAllocRows = useMemo(() => {
-    const summary = buildAllocationSummaryReport(db, catFilter);
+    const summary = buildAllocationSummaryReport(db, 'ALL');
     return summary.rows.filter(
       (r) =>
         r.ministryQty > r.doQty + 0.0005 ||
@@ -279,16 +308,23 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
         r.projectQty > r.doQty + 0.0005 ||
         r.unissuedQty > 0.0005
     );
-  }, [db, catFilter]);
+  }, [db]);
 
   const foodMemos = useMemo(
     () => buildFoodAllocOrderMemos(db, month0, year),
     [db, month0, year]
   );
 
-  const foodKernelMemos = useMemo(
-    () => buildFoodKernelMemos(db, month0, year),
-    [db, month0, year]
+  const omsOrderCategory = useMemo<'ওএমএস সাধারণ' | 'ওএমএস বিশেষ' | 'ওএমএস টিসিবি' | null>(() => {
+    if (activeReportId === 'alloc-oms-gen') return 'ওএমএস সাধারণ';
+    if (activeReportId === 'alloc-oms-spc') return 'ওএমএস বিশেষ';
+    if (activeReportId === 'alloc-oms-tcb') return 'ওএমএস টিসিবি';
+    return null;
+  }, [activeReportId]);
+
+  const omsMemos = useMemo(
+    () => (omsOrderCategory ? buildOmsAllocOrderMemos(db, omsOrderCategory, month0, year) : []),
+    [db, omsOrderCategory, month0, year]
   );
 
   useEffect(() => {
@@ -300,26 +336,123 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
   }, [foodMemos, selectedFoodMemo]);
 
   useEffect(() => {
-    if (
-      selectedKernelMemo !== 'PERCENT' &&
-      !foodKernelMemos.some((k) => k.memo === selectedKernelMemo)
-    ) {
-      const sameMonthKernel = foodKernelMemos.find((k) => k.sameMonth);
-      setSelectedKernelMemo(sameMonthKernel ? sameMonthKernel.memo : 'PERCENT');
+    if (!omsOrderCategory) return;
+    if (omsMemos.length > 0 && !omsMemos.some((m) => m.memo === selectedOmsMemo)) {
+      setSelectedOmsMemo(omsMemos[0].memo);
+    } else if (omsMemos.length === 0 && selectedOmsMemo) {
+      setSelectedOmsMemo('');
     }
-  }, [foodKernelMemos, selectedKernelMemo]);
+  }, [omsOrderCategory, omsMemos, selectedOmsMemo]);
+
+  const isAllocOrder =
+    activeReportId === 'alloc-food' ||
+    activeReportId === 'alloc-oms-gen' ||
+    activeReportId === 'alloc-oms-spc' ||
+    activeReportId === 'alloc-oms-tcb';
 
   const memoKey =
     activeReportId === 'alloc-food'
       ? `alloc-food::${year}-${month0}::${selectedFoodMemo}`
-      : `${activeReportId}::${year}-${month0}`;
+      : omsOrderCategory
+        ? `${activeReportId}::${year}-${month0}::${selectedOmsMemo}`
+        : `${activeReportId}::${year}-${month0}`;
+
+  const foodOrderData = useMemo(() => {
+    if (activeReportId !== 'alloc-food') return null;
+    const includeKernel = foodKernelMode === 'with_kernel';
+    return buildFoodAllocOrderRows(db, month0, year, selectedFoodMemo, {
+      includeKernel,
+      kernelMemo: includeKernel ? 'PERCENT' : undefined,
+      kernelPercent: includeKernel ? 1 : undefined,
+    });
+  }, [activeReportId, db, month0, year, selectedFoodMemo, foodKernelMode]);
+
+  const omsOrderData = useMemo(() => {
+    if (!omsOrderCategory) return null;
+    return buildOmsAllocOrderRows(db, omsOrderCategory, month0, year, selectedOmsMemo);
+  }, [omsOrderCategory, db, month0, year, selectedOmsMemo]);
+
+  const selectedUcfMemo =
+    activeReportId === 'alloc-food'
+      ? selectedFoodMemo
+      : omsOrderCategory
+        ? selectedOmsMemo
+        : '';
+  const selectedUcfSuffix = extractMemoSuffix(selectedUcfMemo, template.memoPrefix);
+  const defaultMemoNo = selectedUcfSuffix
+    ? `${template.memoPrefix}${selectedUcfSuffix}`
+    : `${template.memoPrefix}`;
+  const defaultMemoDate =
+    foodOrderData?.memoDate || omsOrderData?.memoDate || todayIsoDate();
+
   const savedMemo = db.reportMemos[memoKey];
-  const currentMemoNo = savedMemo?.no ?? `${template.memoPrefix}`;
-  const currentMemoDate = savedMemo?.date ?? todayIsoDate();
+  const currentMemoNo = savedMemo?.no?.trim() ? savedMemo.no : defaultMemoNo;
+  const currentMemoDate = savedMemo?.date?.trim() ? savedMemo.date : defaultMemoDate;
+
+  const currentAllocForm = useMemo<AllocOrderFormFields>(() => {
+    const saved = db.allocOrderForms?.[memoKey];
+    const defaultMinMemo =
+      foodOrderData?.sourceMinistryMemo || omsOrderData?.sourceMinistryMemo || '';
+    const defaultMinDate =
+      foodOrderData?.sourceMinistryDate || omsOrderData?.sourceMinistryDate || '';
+    const defaultDcMemo = omsOrderData?.sourceDcMemo || '';
+    const defaultDcDate = omsOrderData?.sourceDcDate || '';
+    const defaultDfcMemo =
+      foodOrderData?.sourceDfcMemo || omsOrderData?.sourceDfcMemo || '';
+    const defaultDfcDate =
+      foodOrderData?.sourceDfcDate || omsOrderData?.sourceDfcDate || '';
+    const monthName = BENGALI_MONTHS[month0] || '';
+    const yrBn = toBnDigits(year);
+    const defaultMiller =
+      db.millers.length > 0
+        ? db.millers
+            .map(
+              (m) =>
+                `মেসার্স ${m.millName || m.millerName}${m.address ? `, ${m.address}` : ''}`
+            )
+            .join(' / ')
+        : '';
+    const defaultOwnSuffix =
+      extractMemoSuffix(currentMemoNo, template.memoPrefix) || selectedUcfSuffix;
+    const resolvedOwnDate = currentMemoDate || todayIsoDate();
+    return {
+      ministryDate: defaultMinDate || saved?.ministryDate?.trim() || '',
+      ministryMemo: defaultMinMemo || saved?.ministryMemo?.trim() || '',
+      dcDate: defaultDcDate || saved?.dcDate?.trim() || '',
+      dcMemo: defaultDcMemo || saved?.dcMemo?.trim() || '',
+      dfcMonth: monthName,
+      dfcDate: defaultDfcDate || saved?.dfcDate?.trim() || '',
+      dfcMemo: defaultDfcMemo || saved?.dfcMemo?.trim() || '',
+      targetMonth: `${monthName} ${yrBn}`,
+      deadlineDate: autoDeadlineIsoDate(resolvedOwnDate, year, month0),
+      ownMemoSuffix: defaultOwnSuffix,
+      bangabdaDate: formatBangabdaDate(resolvedOwnDate),
+      ownDate: resolvedOwnDate,
+      copyMillerText: defaultMiller,
+      openingStockByRow: {},
+    };
+  }, [
+    db.allocOrderForms,
+    db.millers,
+    memoKey,
+    foodOrderData,
+    omsOrderData,
+    month0,
+    year,
+    currentMemoNo,
+    currentMemoDate,
+    selectedUcfSuffix,
+    template.memoPrefix,
+  ]);
 
   interface ReportPayload {
     subjectResolved: string;
     introResolved: string;
+    conditionsResolved?: string;
+    copyMemoResolved?: string;
+    copyListResolved?: string;
+    copyDateResolved?: string;
+    hideTopMemoRow?: boolean;
     columns: DocColumnGroup[];
     leaves: DocColumnLeaf[];
     mergeDepth: number;
@@ -341,11 +474,39 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
   const reportPayload = useMemo<ReportPayload>((): ReportPayload => {
     const monthName = BENGALI_MONTHS[month0] || '';
     const yrBn = toBnDigits(year);
-    const resolvePlaceholders = (s: string) =>
-      s.replace(/\{মাস\}/g, monthName).replace(/\{বছর\}/g, yrBn);
+    const fmtDateOrBlank = (iso: string) =>
+      iso && iso.trim() ? formatBnDate(iso.trim()) : '              ';
+    const boxToken = (val: string | undefined, blank = '              ') =>
+      `[[${(val ?? '').trim() || blank}]]`;
+
+    const resolvePlaceholders = (s: string) => {
+      if (!s) return '';
+      const f = currentAllocForm;
+      const effSuffix =
+        f.ownMemoSuffix.trim() ||
+        (currentMemoNo.startsWith(template.memoPrefix)
+          ? currentMemoNo.slice(template.memoPrefix.length).trim()
+          : '');
+      return s
+        .replace(/\{মাস\}/g, monthName)
+        .replace(/\{বছর\}/g, yrBn)
+        .replace(/\{মন্ত্রণালয়_তারিখ\}/g, boxToken(fmtDateOrBlank(f.ministryDate)))
+        .replace(/\{মন্ত্রণালয়_স্মারক\}/g, boxToken(f.ministryMemo, '                    '))
+        .replace(/\{ডিসি_তারিখ\}/g, boxToken(fmtDateOrBlank(f.dcDate)))
+        .replace(/\{ডিসি_স্মারক\}/g, boxToken(f.dcMemo, '                    '))
+        .replace(/\{ডিএফসি_মাস\}/g, boxToken(f.dfcMonth || monthName, '          '))
+        .replace(/\{ডিএফসি_তারিখ\}/g, boxToken(fmtDateOrBlank(f.dfcDate)))
+        .replace(/\{ডিএফসি_স্মারক\}/g, boxToken(f.dfcMemo, '                    '))
+        .replace(/\{মাস_বক্স\}/g, boxToken(f.targetMonth || `${monthName} ${yrBn}`, '            '))
+        .replace(/\{শেষ_তারিখ\}/g, boxToken(fmtDateOrBlank(f.deadlineDate)))
+        .replace(/\{স্মারক_শেষ\}/g, boxToken(effSuffix, '          '))
+        .replace(/\{তারিখ_বক্স\}/g, boxToken(fmtDateOrBlank(f.ownDate || currentMemoDate)))
+        .replace(/\{বঙ্গাব্দ\}/g, boxToken(f.bangabdaDate, '            '))
+        .replace(/\{মিল_মালিক\}/g, boxToken(f.copyMillerText, '                                        '));
+    };
 
     if (activeReportId === 'monthly-dist') {
-      const rep = buildMonthlyDistributionReport(db, month0, year, catFilter);
+      const rep = buildMonthlyDistributionReport(db, month0, year, 'ALL');
       const cPrevR: DocColumnLeaf = { key: 'pr', label: colLabel('pr', 'চাল'), align: 'right' };
       const cPrevW: DocColumnLeaf = { key: 'pw', label: colLabel('pw', 'গম'), align: 'right' };
       const cPrevA: DocColumnLeaf = { key: 'pa', label: colLabel('pa', 'আটা'), align: 'right' };
@@ -452,7 +613,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
     }
 
     if (activeReportId === 'alloc-summary') {
-      const sum = buildAllocationSummaryReport(db, catFilter);
+      const sum = buildAllocationSummaryReport(db, 'ALL');
       const leaves: DocColumnLeaf[] = [
         { key: 'cat', label: colLabel('cat', 'খাতের নাম'), align: 'left' },
         { key: 'grain', label: colLabel('grain', 'শস্য'), align: 'center' },
@@ -637,15 +798,9 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
       };
     }
 
-    if (activeReportId === 'alloc-food') {
+    if (activeReportId === 'alloc-food' && foodOrderData) {
       const includeKernel = foodKernelMode === 'with_kernel';
-      const kernelPct = Math.max(0, Number(kernelPercentInput) || 0);
-      const ord = buildFoodAllocOrderRows(db, month0, year, selectedFoodMemo, {
-        includeKernel,
-        kernelMemo: includeKernel ? selectedKernelMemo : undefined,
-        kernelPercent:
-          includeKernel && selectedKernelMemo === 'PERCENT' ? kernelPct : undefined,
-      });
+      const ord = foodOrderData;
 
       const leaves: DocColumnLeaf[] = includeKernel
         ? [
@@ -653,11 +808,12 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
             { key: 'serial', label: colLabel('serial', 'ক্রমিক'), align: 'center' },
             { key: 'center', label: colLabel('center', 'বিক্রয় কেন্দ্র'), align: 'left' },
             { key: 'dealer', label: colLabel('dealer', 'ডিলারের নাম'), align: 'left' },
-            { key: 'mobile', label: colLabel('mobile', 'মোবাইল'), align: 'center' },
             { key: 'cards', label: colLabel('cards', 'কার্ড'), align: 'center' },
-            { key: 'qtyWithoutKernel', label: colLabel('qtyWithoutKernel', 'কার্নেল ছাড়া পরিমাণ'), align: 'right' },
-            { key: 'kernelQty', label: colLabel('kernelQty', 'কার্নেল'), align: 'right' },
-            { key: 'qtyWithKernel', label: colLabel('qtyWithKernel', 'কার্নেল সহ পরিমাণ'), align: 'right' },
+            { key: 'totalRice', label: colLabel('totalRice', 'চালের পরিমাণ\n(মে.টন)'), align: 'right' },
+            { key: 'openingStock', label: colLabel('openingStock', 'প্রারম্ভিক মজুদ\n(মে.টন)'), align: 'right' },
+            { key: 'qtyWithoutKernel', label: colLabel('qtyWithoutKernel', 'চলতি মাসের বরাদ্দের\nপরিমাণ (মে.টন)'), align: 'right' },
+            { key: 'kernelQty', label: colLabel('kernelQty', 'বরাদ্দকৃত কার্নেলের\nপরিমাণ (মে.টন)'), align: 'right' },
+            { key: 'qtyWithKernel', label: colLabel('qtyWithKernel', 'কার্নেলসহ মোট\nবরাদ্দের পরিমাণ (মে.টন)'), align: 'right' },
             { key: 'amount', label: colLabel('amount', 'টাকা'), align: 'right' },
             { key: 'tax', label: colLabel('tax', 'আয়কর'), align: 'right' },
           ]
@@ -666,82 +822,108 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
             { key: 'serial', label: colLabel('serial', 'ক্রমিক'), align: 'center' },
             { key: 'center', label: colLabel('center', 'বিক্রয় কেন্দ্র'), align: 'left' },
             { key: 'dealer', label: colLabel('dealer', 'ডিলারের নাম'), align: 'left' },
-            { key: 'mobile', label: colLabel('mobile', 'মোবাইল'), align: 'center' },
             { key: 'cards', label: colLabel('cards', 'কার্ড'), align: 'center' },
-            { key: 'qty', label: colLabel('qty', 'পরিমাণ'), align: 'right' },
+            { key: 'totalRice', label: colLabel('totalRice', 'চালের পরিমাণ\n(মে.টন)'), align: 'right' },
+            { key: 'openingStock', label: colLabel('openingStock', 'প্রারম্ভিক মজুদ\n(মে.টন)'), align: 'right' },
+            { key: 'qty', label: colLabel('qty', 'চলতি মাসের বরাদ্দের\nপরিমাণ (মে.টন)'), align: 'right' },
             { key: 'amount', label: colLabel('amount', 'টাকা'), align: 'right' },
             { key: 'tax', label: colLabel('tax', 'আয়কর'), align: 'right' },
           ];
 
-      const totCards = ord.rows.reduce((s, r) => s + r.cards, 0);
-      const totQty = round3(ord.rows.reduce((s, r) => s + r.qty, 0));
-      const totWithoutKernel = round3(ord.rows.reduce((s, r) => s + r.qtyWithoutKernel, 0));
-      const totKernelQty = round3(ord.rows.reduce((s, r) => s + r.kernelQty, 0));
-      const totWithKernel = round3(ord.rows.reduce((s, r) => s + r.qtyWithKernel, 0));
-      const totAmt = round2(ord.rows.reduce((s, r) => s + r.amount, 0));
-      const totTax = round2(ord.rows.reduce((s, r) => s + r.tax, 0));
+      const rowComputed = ord.rows.map((r) => ({
+        r,
+        openingStock: r.openingStockQty,
+        totalRice: r.totalRiceRequirement,
+        qtyWithoutKernel: r.qtyWithoutKernel,
+        kernelQty: r.kernelQty,
+        qtyWithKernel: r.qtyWithKernel,
+        amount: r.amount,
+        tax: r.tax,
+      }));
+
+      const totCards = rowComputed.reduce((s, x) => s + x.r.cards, 0);
+      const totTotalRice = round3(rowComputed.reduce((s, x) => s + x.totalRice, 0));
+      const totOpeningStock = round3(rowComputed.reduce((s, x) => s + x.openingStock, 0));
+      const totWithoutKernel = round3(rowComputed.reduce((s, x) => s + x.qtyWithoutKernel, 0));
+      const totKernelQty = round3(rowComputed.reduce((s, x) => s + x.kernelQty, 0));
+      const totWithKernel = round3(rowComputed.reduce((s, x) => s + x.qtyWithKernel, 0));
+      const totAmt = round2(rowComputed.reduce((s, x) => s + x.amount, 0));
+      const totTax = round2(rowComputed.reduce((s, x) => s + x.tax, 0));
 
       let prevUnion = '';
       let unionDealerIdx = 0;
 
-      const baseSubject = resolvePlaceholders(template.subject);
-      const modeTag = includeKernel ? 'কার্নেল সহ' : 'কার্নেল ছাড়া';
-      const subjectWithMode = /কার্নেল/.test(baseSubject)
-        ? baseSubject
-        : `${baseSubject} (${modeTag})`;
+      const resolvedCopyMemo = template.copyMemoText
+        ? resolvePlaceholders(template.copyMemoText)
+        : `স্মারক নং- ${template.memoPrefix}[[${currentAllocForm.ownMemoSuffix || '          '}]]`;
+      const resolvedCopyList = resolvePlaceholders(template.copyList);
+      const copyDateResolved = `${boxToken(fmtDateOrBlank(currentAllocForm.ownDate || currentMemoDate))} খ্রিঃ`;
 
       return {
-        subjectResolved: subjectWithMode,
+        subjectResolved: resolvePlaceholders(template.subject),
         introResolved: resolvePlaceholders(template.introText),
+        conditionsResolved: resolvePlaceholders(template.conditionsText || ''),
+        copyMemoResolved: resolvedCopyMemo,
+        copyListResolved: resolvedCopyList,
+        copyDateResolved,
+        hideTopMemoRow: template.hideTopMemoRow ?? true,
         columns: leaves.map((l) => ({ label: l.label, leaf: l })),
         leaves,
         mergeDepth: 1,
         showSerialCol: false,
         serialColLabel: 'ক্রমিক',
         colWidths: includeKernel
-          ? ['10%', '5%', '11%', '20%', '10%', '6%', '8%', '7%', '8%', '8%', '7%']
-          : ['11%', '6%', '13%', '24%', '12%', '8%', '10%', '9%', '7%'],
+          ? ['8%', '4%', '10%', '16%', '6%', '8%', '8%', '8%', '8%', '9%', '8%', '7%']
+          : ['10%', '5%', '12%', '19%', '7%', '9%', '9%', '10%', '10%', '9%'],
         tableLayoutFixed: true,
         footerLayout: 'sign_above_copy',
-        rows: ord.rows.map((r, i) => {
-          const cleanUnion = r.union.replace(/\s*ইউনিয়ন$/g, '').trim() || r.union;
-          if (cleanUnion !== prevUnion) {
-            prevUnion = cleanUnion;
-            unionDealerIdx = 1;
-          } else {
-            unionDealerIdx++;
+        rows: rowComputed.map(
+          (
+            { r, openingStock, totalRice, qtyWithoutKernel, kernelQty, qtyWithKernel, amount, tax },
+            i
+          ) => {
+            const cleanUnion = r.union.replace(/\s*ইউনিয়ন$/g, '').trim() || r.union;
+            if (cleanUnion !== prevUnion) {
+              prevUnion = cleanUnion;
+              unionDealerIdx = 1;
+            } else {
+              unionDealerIdx++;
+            }
+            return {
+              id: `fa-${i}`,
+              groupValues: [cleanUnion],
+              cells: {
+                union: cleanUnion,
+                serial: toBnDigits(i + 1),
+                center: r.salesCenter || '—',
+                dealer: `${toBnDigits(unionDealerIdx)}। ${template.namePrefix || ''}${r.dealerName}`,
+                cards: formatBnInt(r.cards),
+                totalRice: formatBnQty(totalRice),
+                openingStock: formatBnQty(openingStock),
+                ...(includeKernel
+                  ? {
+                      qtyWithoutKernel: formatBnQty(qtyWithoutKernel),
+                      kernelQty: formatBnQty(kernelQty),
+                      qtyWithKernel: formatBnQty(qtyWithKernel),
+                    }
+                  : {
+                      qty: formatBnQty(qtyWithoutKernel),
+                    }),
+                amount: formatBnMoney(amount),
+                tax: formatBnMoney(tax),
+              },
+              hasSignature: false,
+            };
           }
-          return {
-            id: `fa-${i}`,
-            groupValues: [cleanUnion],
-            cells: {
-              union: cleanUnion,
-              serial: toBnDigits(i + 1),
-              center: r.salesCenter || '—',
-              dealer: `${toBnDigits(unionDealerIdx)}। ${template.namePrefix || ''}${r.dealerName}`,
-              mobile: toBnDigits(r.mobile || '—'),
-              cards: formatBnInt(r.cards),
-              ...(includeKernel
-                ? {
-                    qtyWithoutKernel: formatBnQty(r.qtyWithoutKernel),
-                    kernelQty: formatBnQty(r.kernelQty),
-                    qtyWithKernel: formatBnQty(r.qtyWithKernel),
-                  }
-                : {
-                    qty: formatBnQty(r.qty),
-                  }),
-              amount: formatBnMoney(r.amount),
-              tax: formatBnMoney(r.tax),
-            },
-            hasSignature: false,
-          };
-        }),
+        ),
         totalRow: {
           label: template.totalLabel || 'সর্বমোট',
-          labelColSpan: 5,
+          labelColSpan: 4,
           values: includeKernel
             ? {
                 cards: formatBnInt(totCards),
+                totalRice: formatBnQty(totTotalRice),
+                openingStock: formatBnQty(totOpeningStock),
                 qtyWithoutKernel: formatBnQty(totWithoutKernel),
                 kernelQty: formatBnQty(totKernelQty),
                 qtyWithKernel: formatBnQty(totWithKernel),
@@ -750,10 +932,174 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
               }
             : {
                 cards: formatBnInt(totCards),
-                qty: formatBnQty(totQty),
+                totalRice: formatBnQty(totTotalRice),
+                openingStock: formatBnQty(totOpeningStock),
+                qty: formatBnQty(totWithoutKernel),
                 amount: formatBnMoney(totAmt),
                 tax: formatBnMoney(totTax),
               },
+        },
+        showRecipientBlock: false,
+        showIntroBlock: true,
+        showCopyBlock: template.showCopyBlock,
+      };
+    }
+
+    if (omsOrderCategory && omsOrderData) {
+      const isTCB = omsOrderCategory === 'ওএমএস টিসিবি';
+      const ord = omsOrderData;
+
+      const rowComputed = ord.rows.map((r) => ({
+        r,
+        openingStock: r.openingStockQty,
+        grossRice: r.totalRiceRequirement,
+        effQty: r.qty,
+        effAmount: r.amount,
+        effTax: r.tax,
+        comment: r.comment || '',
+      }));
+
+      const resolvedCopyMemo = template.copyMemoText
+        ? resolvePlaceholders(template.copyMemoText)
+        : `স্মারক নং- ${template.memoPrefix}[[${currentAllocForm.ownMemoSuffix || '          '}]]`;
+      const resolvedCopyList = resolvePlaceholders(template.copyList);
+      const copyDateResolved = isTCB
+        ? `${boxToken(currentAllocForm.bangabdaDate, '            ')} বঙ্গাব্দ / ${boxToken(fmtDateOrBlank(currentAllocForm.ownDate || currentMemoDate))} খ্রিঃ।`
+        : `${boxToken(fmtDateOrBlank(currentAllocForm.ownDate || currentMemoDate))} খ্রিঃ`;
+
+      if (isTCB) {
+        const leaves: DocColumnLeaf[] = [
+          { key: 'serial', label: colLabel('serial', 'ক্রমিক\nনং'), align: 'center' },
+          { key: 'union', label: colLabel('union', 'ইউনিয়ন / পৌরসভার\nনাম'), align: 'left' },
+          { key: 'dealer', label: colLabel('dealer', 'মনোনীত খাদ্যবান্ধব /\nওএমএস ডিলারের নাম'), align: 'left' },
+          { key: 'cards', label: colLabel('cards', 'এক্টিভেটেড\nকার্ড সংখ্যা'), align: 'center' },
+          { key: 'rice5kg', label: colLabel('rice5kg', '৫ কেজি হারে চালের\nপরিমাণ (মে. টন)'), align: 'right' },
+          { key: 'openingStock', label: colLabel('openingStock', 'প্রারম্ভিক মজুদ\n(মে. টন)'), align: 'right' },
+          { key: 'qty', label: colLabel('qty', 'চলতি মাসের বরাদ্দের\nপরিমাণ (মে. টন)'), align: 'right' },
+          { key: 'amount', label: colLabel('amount', 'চালের মোট মূল্য\n(টাকা)'), align: 'right' },
+          { key: 'tax', label: colLabel('tax', 'আয়কর\n(টাকা)'), align: 'right' },
+          { key: 'comment', label: colLabel('comment', 'মন্তব্য'), align: 'center' },
+        ];
+
+        const totCards = rowComputed.reduce((s, x) => s + x.r.cards, 0);
+        const totGross = round3(rowComputed.reduce((s, x) => s + x.grossRice, 0));
+        const totOpen = round3(rowComputed.reduce((s, x) => s + x.openingStock, 0));
+        const totQty = round3(rowComputed.reduce((s, x) => s + x.effQty, 0));
+        const totAmt = round2(rowComputed.reduce((s, x) => s + x.effAmount, 0));
+        const totTax = round2(rowComputed.reduce((s, x) => s + x.effTax, 0));
+
+        return {
+          subjectResolved: resolvePlaceholders(template.subject),
+          introResolved: resolvePlaceholders(template.introText),
+          conditionsResolved: resolvePlaceholders(template.conditionsText || ''),
+          copyMemoResolved: resolvedCopyMemo,
+          copyListResolved: resolvedCopyList,
+          copyDateResolved,
+          hideTopMemoRow: template.hideTopMemoRow ?? true,
+          columns: leaves.map((l) => ({ label: l.label, leaf: l })),
+          leaves,
+          mergeDepth: 0,
+          showSerialCol: false,
+          serialColLabel: 'ক্রমিক',
+          colWidths: ['5%', '12%', '17%', '9%', '10%', '9%', '10%', '11%', '9%', '8%'],
+          tableLayoutFixed: true,
+          footerLayout: 'sign_above_copy',
+          rows: rowComputed.map(({ r, openingStock, grossRice, effQty, effAmount, effTax, comment }, i) => ({
+            id: `otcb-${i}`,
+            cells: {
+              serial: toBnDigits(i + 1),
+              union: r.union || '—',
+              dealer: `${template.namePrefix || ''}${r.dealerName}${r.salesCenter && r.salesCenter !== '—' ? `\n(${r.salesCenter})` : ''}`,
+              cards: formatBnInt(r.cards),
+              rice5kg: formatBnQty(grossRice),
+              openingStock: formatBnQty(openingStock),
+              qty: formatBnQty(effQty),
+              amount: formatBnMoney(effAmount),
+              tax: formatBnMoney(effTax),
+              comment: comment || '',
+            },
+            hasSignature: false,
+          })),
+          totalRow: {
+            label: template.totalLabel || 'সর্বমোট',
+            labelColSpan: 3,
+            values: {
+              cards: formatBnInt(totCards),
+              rice5kg: formatBnQty(totGross),
+              openingStock: formatBnQty(totOpen),
+              qty: formatBnQty(totQty),
+              amount: formatBnMoney(totAmt),
+              tax: formatBnMoney(totTax),
+              comment: '',
+            },
+          },
+          showRecipientBlock: false,
+          showIntroBlock: true,
+          showCopyBlock: template.showCopyBlock,
+        };
+      }
+
+      // alloc-oms-spc & alloc-oms-gen (9 columns matching Page 3-4)
+      const leaves: DocColumnLeaf[] = [
+        { key: 'union', label: colLabel('union', 'ইউনিয়ন / পৌরসভা'), align: 'center' },
+        { key: 'serial', label: colLabel('serial', 'ক্রমিক'), align: 'center' },
+        { key: 'center', label: colLabel('center', 'বিক্রয় কেন্দ্র'), align: 'left' },
+        { key: 'dealer', label: colLabel('dealer', 'ডিলারের নাম'), align: 'left' },
+        { key: 'totalRice', label: colLabel('totalRice', 'চালের পরিমাণ\n(মে.টন)'), align: 'right' },
+        { key: 'openingStock', label: colLabel('openingStock', 'প্রারম্ভিক মজুদ\n(মে.টন)'), align: 'right' },
+        { key: 'qty', label: colLabel('qty', 'বরাদ্দের পরিমাণ\n(মে.টন)'), align: 'right' },
+        { key: 'amount', label: colLabel('amount', 'টাকা'), align: 'right' },
+        { key: 'tax', label: colLabel('tax', 'আয়কর'), align: 'right' },
+      ];
+
+      const totGross = round3(rowComputed.reduce((s, x) => s + x.grossRice, 0));
+      const totOpen = round3(rowComputed.reduce((s, x) => s + x.openingStock, 0));
+      const totQty = round3(rowComputed.reduce((s, x) => s + x.effQty, 0));
+      const totAmt = round2(rowComputed.reduce((s, x) => s + x.effAmount, 0));
+      const totTax = round2(rowComputed.reduce((s, x) => s + x.effTax, 0));
+
+      return {
+        subjectResolved: resolvePlaceholders(template.subject),
+        introResolved: resolvePlaceholders(template.introText),
+        conditionsResolved: resolvePlaceholders(template.conditionsText || ''),
+        copyMemoResolved: resolvedCopyMemo,
+        copyListResolved: resolvedCopyList,
+        copyDateResolved,
+        hideTopMemoRow: template.hideTopMemoRow ?? true,
+        columns: leaves.map((l) => ({ label: l.label, leaf: l })),
+        leaves,
+        mergeDepth: 1,
+        showSerialCol: false,
+        serialColLabel: 'ক্রমিক',
+        colWidths: ['12%', '6%', '14%', '20%', '10%', '10%', '10%', '10%', '8%'],
+        tableLayoutFixed: true,
+        footerLayout: 'sign_above_copy',
+        rows: rowComputed.map(({ r, openingStock, grossRice, effQty, effAmount, effTax }, i) => ({
+          id: `ooms-${i}`,
+          groupValues: [r.union || '—'],
+          cells: {
+            union: r.union || '—',
+            serial: toBnDigits(i + 1),
+            center: r.salesCenter || '—',
+            dealer: `${toBnDigits(i + 1)}। ${template.namePrefix || ''}${r.dealerName}`,
+            totalRice: formatBnQty(grossRice),
+            openingStock: formatBnQty(openingStock),
+            qty: formatBnQty(effQty),
+            amount: formatBnMoney(effAmount),
+            tax: formatBnMoney(effTax),
+          },
+          hasSignature: false,
+        })),
+        totalRow: {
+          label: template.totalLabel || 'সর্বমোট',
+          labelColSpan: 4,
+          values: {
+            totalRice: formatBnQty(totGross),
+            openingStock: formatBnQty(totOpen),
+            qty: formatBnQty(totQty),
+            amount: formatBnMoney(totAmt),
+            tax: formatBnMoney(totTax),
+          },
         },
         showRecipientBlock: false,
         showIntroBlock: true,
@@ -829,10 +1175,8 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
     if (activeReportId === 'do-reg-issue') {
       const filtered = db.doIssues
         .filter((d) => {
-          if (catFilter !== 'ALL' && d.category !== catFilter) return false;
-          if (startDate && d.issueDate < startDate) return false;
-          if (endDate && d.issueDate > endDate) return false;
-          return true;
+          const my = parseMonthYear(d.issueDate);
+          return Boolean(my && my.year === year && my.month === month0);
         })
         .sort((a, b) => a.issueDate.localeCompare(b.issueDate));
 
@@ -855,7 +1199,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
       const qtyIdx = allIssueLeaves.findIndex((l) => l.key === 'qty');
 
       return {
-        subjectResolved: resolvePlaceholders(template.subject),
+        subjectResolved: `${resolvePlaceholders(template.subject)} (মাস: ${monthName} ${yrBn})`,
         introResolved: '',
         columns: allIssueLeaves.map((l) => ({ label: l.label, leaf: l })),
         leaves: allIssueLeaves,
@@ -878,7 +1222,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
                 (c) =>
                   c.challanType === 'মূল চালান' &&
                   c.doNo &&
-                  normMemoNo(c.doNo) === normMemoNo(d.doNo) &&
+                  normDoNo(c.doNo) === normDoNo(d.doNo) &&
                   validForDo(c)
               );
           const taxRec = d.taxChallanNo
@@ -892,7 +1236,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
                 (c) =>
                   c.challanType === 'আয়কর চালান' &&
                   c.doNo &&
-                  normMemoNo(c.doNo) === normMemoNo(d.doNo) &&
+                  normDoNo(c.doNo) === normDoNo(d.doNo) &&
                   validForDo(c)
               );
           const mainNo = mainRec?.challanNo || (isChallanOnOrBeforeDo(d.challanDate, d.issueDate, false) ? d.challanNo : undefined);
@@ -944,9 +1288,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
     }
 
     if (activeReportId === 'do-reg-unused') {
-      const list = getUnusedDoNumbers(db).filter(
-        (u) => bookFilter === 'ALL' || String(u.bookNo) === bookFilter
-      );
+      const list = getUnusedDoNumbers(db);
       const leaves: DocColumnLeaf[] = [
         { key: 'bookNo', label: colLabel('bookNo', 'বই নং'), align: 'center' },
         { key: 'doNo', label: colLabel('doNo', 'ডিও নং'), align: 'center' },
@@ -1116,11 +1458,13 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
     db,
     month0,
     year,
-    catFilter,
-    selectedFoodMemo,
-    startDate,
-    endDate,
-    bookFilter,
+    foodOrderData,
+    omsOrderCategory,
+    omsOrderData,
+    foodKernelMode,
+    currentAllocForm,
+    currentMemoNo,
+    currentMemoDate,
     template,
     doIssueCols,
     foodDealerCols,
@@ -1141,15 +1485,16 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
     activeReportId === 'monthly-dist' ||
     activeReportId === 'monthly-cash' ||
     activeReportId === 'monthly-ep' ||
-    activeReportId === 'alloc-food';
+    activeReportId === 'do-reg-issue' ||
+    isAllocOrder;
 
   const currentOrientation = template?.orientation || 'portrait';
 
   return (
     <div className="space-y-4 font-nikosh">
-      {/* Top 3 Parent Report Options + Circular Sub-Menu Icons */}
+      {/* Top 4 Parent Report Options + Circular Sub-Menu Icons */}
       <div className="no-print rounded-2xl border border-slate-200 bg-white p-3.5 space-y-3.5">
-        <div className="grid grid-cols-3 gap-2">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
           {REPORT_PARENT_GROUPS.map((grp) => {
             const active = grp.key === activeParent;
             return (
@@ -1203,283 +1548,123 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
           })}
         </div>
 
-        {/* Structured Reactive Filter Grid */}
-        <div className="space-y-2.5 pt-2 border-t border-slate-100 text-xs">
-          {/* Row 1: Left Month, Right Year */}
-          {showMonthYearRow && (
-            <div className="grid grid-cols-2 gap-2.5">
-              <div>
-                <label className="block text-[11px] font-bold text-slate-600 mb-1">মাস</label>
-                <select
-                  value={month0}
-                  onChange={(e) => setMonth0(Number(e.target.value))}
-                  className="w-full min-h-[42px] rounded-xl border border-slate-300 px-3 py-1.5 bg-white font-bold"
-                >
-                  {BENGALI_MONTHS.map((m, idx) => (
-                    <option key={m} value={idx}>
-                      {m}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-[11px] font-bold text-slate-600 mb-1">বছর</label>
-                <select
-                  value={year}
-                  onChange={(e) => setYear(Number(e.target.value))}
-                  className="w-full min-h-[42px] rounded-xl border border-slate-300 px-3 py-1.5 bg-white font-bold"
-                >
-                  {yearOptions.map((y) => (
-                    <option key={y} value={y}>
-                      {toBnDigits(y)}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-          )}
-
-          {/* Row 2: Left Memo No (স্মারক), Right Date (তারিখ) */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-            <div>
-              <label className="block text-[11px] font-bold text-slate-600 mb-1">স্মারক</label>
-              <input
-                type="text"
-                value={currentMemoNo}
-                onChange={(e) => onSaveReportMemo(memoKey, e.target.value, currentMemoDate)}
-                placeholder="স্মারক নম্বর"
-                className="w-full min-h-[42px] rounded-xl border border-slate-300 px-3 py-1.5 bg-white font-bold"
-              />
-            </div>
-            <div>
-              <label className="block text-[11px] font-bold text-slate-600 mb-1">তারিখ</label>
-              <input
-                type="date"
-                value={currentMemoDate}
-                onChange={(e) => onSaveReportMemo(memoKey, currentMemoNo, e.target.value)}
-                className="w-full min-h-[42px] rounded-xl border border-slate-300 px-3 py-1.5 bg-white"
-              />
-            </div>
-          </div>
-
-          {/* Contextual Extra Filters */}
-          {(activeReportId === 'monthly-dist' ||
-            activeReportId === 'alloc-summary' ||
-            activeReportId === 'do-reg-issue') && (
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-              <div>
-                <label className="block text-[11px] font-bold text-slate-600 mb-1">খাত ফিল্টার</label>
-                <select
-                  value={catFilter}
-                  onChange={(e) => setCatFilter(e.target.value)}
-                  className="w-full min-h-[42px] rounded-xl border border-slate-300 px-3 py-1.5 bg-white font-bold"
-                >
-                  <option value="ALL">সকল খাত</option>
-                  {CATEGORIES.map((c) => (
-                    <option key={c.id} value={c.category}>
-                      {c.category}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              {activeReportId === 'do-reg-issue' && (
-                <>
-                  <div>
-                    <label className="block text-[11px] font-bold text-slate-600 mb-1">শুরুর তারিখ</label>
-                    <input
-                      type="date"
-                      value={startDate}
-                      onChange={(e) => setStartDate(e.target.value)}
-                      className="w-full min-h-[42px] rounded-xl border border-slate-300 px-2.5 py-1.5"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[11px] font-bold text-slate-600 mb-1">শেষ তারিখ</label>
-                    <input
-                      type="date"
-                      value={endDate}
-                      onChange={(e) => setEndDate(e.target.value)}
-                      className="w-full min-h-[42px] rounded-xl border border-slate-300 px-2.5 py-1.5"
-                    />
-                  </div>
-                </>
-              )}
-            </div>
-          )}
-
-          {activeReportId === 'alloc-food' && (
-            <div className="space-y-2.5 pt-1">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+        {/* Minimal Selection Controls: ONLY Month, Year, and Suballocation Memo */}
+        {(showMonthYearRow || isAllocOrder) && (
+          <div className="space-y-2.5 pt-2 border-t border-slate-100 text-xs">
+            {showMonthYearRow && (
+              <div className="grid grid-cols-2 gap-2.5">
                 <div>
-                  <label className="block text-[11px] font-bold text-slate-600 mb-1">
-                    উপবরাদ্দ স্মারক নির্বাচন
-                  </label>
+                  <label className="block text-[11px] font-bold text-slate-600 mb-1">মাস</label>
                   <select
-                    value={selectedFoodMemo}
-                    onChange={(e) => setSelectedFoodMemo(e.target.value)}
+                    value={month0}
+                    onChange={(e) => setMonth0(Number(e.target.value))}
                     className="w-full min-h-[42px] rounded-xl border border-slate-300 px-3 py-1.5 bg-white font-bold"
                   >
-                    {foodMemos.length === 0 ? (
-                      <option value="">নির্বাচিত মাসে কোনো বরাদ্দ নেই</option>
-                    ) : (
-                      foodMemos.map((m) => (
-                        <option key={m.memo} value={m.memo}>
-                          {toBnDigits(m.memo)} ({formatBnDate(m.date)} · {formatBnQty(m.totalQty)} মে.টন · {m.grain})
-                        </option>
-                      ))
-                    )}
+                    {BENGALI_MONTHS.map((m, idx) => (
+                      <option key={m} value={idx}>
+                        {m}
+                      </option>
+                    ))}
                   </select>
                 </div>
-
                 <div>
-                  <label className="block text-[11px] font-bold text-slate-600 mb-1">
-                    প্রিন্ট ধরন (কার্নেল ছাড়া / কার্নেল সহ)
-                  </label>
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setFoodKernelMode('without_kernel')}
-                      className={`min-h-[42px] rounded-xl border px-3 py-1.5 text-xs font-bold cursor-pointer transition-colors ${
-                        foodKernelMode === 'without_kernel'
-                          ? 'bg-[#E2136E] text-white border-[#E2136E] shadow-xs'
-                          : 'bg-white text-slate-800 border-slate-300 hover:bg-rose-50'
-                      }`}
-                    >
-                      কার্নেল ছাড়া
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setFoodKernelMode('with_kernel');
-                        const sameMonthK = foodKernelMemos.find((k) => k.sameMonth);
-                        if (sameMonthK && selectedKernelMemo === 'PERCENT') {
-                          setSelectedKernelMemo(sameMonthK.memo);
-                        }
-                      }}
-                      className={`min-h-[42px] rounded-xl border px-3 py-1.5 text-xs font-bold cursor-pointer transition-colors ${
-                        foodKernelMode === 'with_kernel'
-                          ? 'bg-emerald-700 text-white border-emerald-700 shadow-xs'
-                          : 'bg-white text-slate-800 border-slate-300 hover:bg-emerald-50'
-                      }`}
-                    >
-                      কার্নেল সহ
-                    </button>
-                  </div>
+                  <label className="block text-[11px] font-bold text-slate-600 mb-1">বছর</label>
+                  <select
+                    value={year}
+                    onChange={(e) => setYear(Number(e.target.value))}
+                    className="w-full min-h-[42px] rounded-xl border border-slate-300 px-3 py-1.5 bg-white font-bold"
+                  >
+                    {yearOptions.map((y) => (
+                      <option key={y} value={y}>
+                        {toBnDigits(y)}
+                      </option>
+                    ))}
+                  </select>
                 </div>
               </div>
+            )}
 
-              {foodKernelMode === 'with_kernel' && (
-                <div className="rounded-xl border border-emerald-200 bg-emerald-50/70 p-3 space-y-2">
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 items-end">
-                    <div className="sm:col-span-2">
-                      <label className="block text-[11px] font-bold text-emerald-950 mb-1">
-                        কার্নেলের উৎস (কার্নেল উপবরাদ্দ স্মারক অথবা শতকরা হার)
+            {isAllocOrder && (
+              <div>
+                {activeReportId === 'alloc-food' ? (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                        উপ-বরাদ্দের স্মারক নম্বর
                       </label>
                       <select
-                        value={selectedKernelMemo}
-                        onChange={(e) => setSelectedKernelMemo(e.target.value)}
-                        className="w-full min-h-[40px] rounded-xl border border-emerald-300 px-3 py-1.5 bg-white font-bold text-slate-900"
+                        value={selectedFoodMemo}
+                        onChange={(e) => setSelectedFoodMemo(e.target.value)}
+                        className="w-full min-h-[42px] rounded-xl border border-slate-300 px-3 py-1.5 bg-white font-bold"
                       >
-                        <option value="PERCENT">শতকরা হার (%) দিয়ে হিসাব করুন</option>
-                        {foodKernelMemos.map((k) => (
-                          <option key={k.memo} value={k.memo}>
-                            কার্নেল স্মারক: {toBnDigits(k.memo)} ({formatBnDate(k.date)} · {formatBnQty(k.totalQty)} মে.টন)
-                          </option>
-                        ))}
+                        {foodMemos.length === 0 ? (
+                          <option value="">নির্বাচিত মাসে কোনো বরাদ্দ নেই</option>
+                        ) : (
+                          foodMemos.map((m) => (
+                            <option key={m.memo} value={m.memo}>
+                              {toBnDigits(m.memo)} ({formatBnDate(m.date)} · {formatBnQty(m.totalQty)} মে.টন · {m.grain})
+                            </option>
+                          ))
+                        )}
                       </select>
                     </div>
 
-                    {selectedKernelMemo === 'PERCENT' && (
-                      <div>
-                        <label className="block text-[11px] font-bold text-emerald-950 mb-1">
-                          কার্নেল হার (%)
-                        </label>
-                        <input
-                          type="number"
-                          step="0.01"
-                          min="0"
-                          value={kernelPercentInput}
-                          onChange={(e) => setKernelPercentInput(e.target.value)}
-                          placeholder="যেমন: 1"
-                          className="w-full min-h-[40px] rounded-xl border border-emerald-300 px-3 py-1.5 bg-white font-bold text-right tabular-nums"
-                        />
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                        প্রিন্ট ধরন
+                      </label>
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setFoodKernelMode('without_kernel')}
+                          className={`min-h-[42px] rounded-xl border px-3 py-1.5 text-xs font-bold cursor-pointer transition-colors ${
+                            foodKernelMode === 'without_kernel'
+                              ? 'bg-[#E2136E] text-white border-[#E2136E] shadow-xs'
+                              : 'bg-white text-slate-800 border-slate-300 hover:bg-rose-50'
+                          }`}
+                        >
+                          কার্নেল ছাড়া
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setFoodKernelMode('with_kernel')}
+                          className={`min-h-[42px] rounded-xl border px-3 py-1.5 text-xs font-bold cursor-pointer transition-colors ${
+                            foodKernelMode === 'with_kernel'
+                              ? 'bg-emerald-700 text-white border-emerald-700 shadow-xs'
+                              : 'bg-white text-slate-800 border-slate-300 hover:bg-emerald-50'
+                          }`}
+                        >
+                          কার্নেল সহ (১%)
+                        </button>
                       </div>
-                    )}
+                    </div>
                   </div>
-                  <p className="text-[11px] font-semibold text-emerald-900">
-                    নোট: ছকে «কার্নেল ছাড়া পরিমাণ», «কার্নেল» এবং «কার্নেল সহ পরিমাণ» আলাদাভাবে দেখানো হবে; কিন্তু টাকা ও আয়কর কেবল «কার্নেল ছাড়া পরিমাণ»-এর ওপরই হিসাব হবে (কার্নেলের কোনো টাকা যোগ হবে না)।
-                  </p>
-                </div>
-              )}
-            </div>
-          )}
-
-          {activeReportId === 'do-reg-unused' && (
-            <div>
-              <label className="block text-[11px] font-bold text-slate-600 mb-1">ডিও বই ফিল্টার</label>
-              <select
-                value={bookFilter}
-                onChange={(e) => setBookFilter(e.target.value)}
-                className="w-full sm:w-64 min-h-[42px] rounded-xl border border-slate-300 px-3 py-1.5 bg-white font-bold"
-              >
-                <option value="ALL">সকল বই</option>
-                {db.doBooks.map((b) => (
-                  <option key={b.id} value={String(b.bookNo)}>
-                    বই নং {toBnDigits(b.bookNo)}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-
-          {/* Column Picker Checkboxes */}
-          {(activeReportId === 'do-reg-issue' ||
-            activeReportId === 'dlr-rep-food' ||
-            activeReportId === 'dlr-rep-oms') && (
-            <div className="pt-2 border-t border-slate-100 space-y-1.5">
-              <div className="text-[11px] font-bold text-slate-700">কলাম নির্বাচন করুন:</div>
-              <div className="flex flex-wrap gap-1.5">
-                {(activeReportId === 'do-reg-issue'
-                  ? DO_ISSUE_COLUMN_DEFS
-                  : activeReportId === 'dlr-rep-food'
-                    ? FOOD_DEALER_COLUMN_DEFS
-                    : OMS_DEALER_COLUMN_DEFS
-                ).map((def) => {
-                  const selectedList =
-                    activeReportId === 'do-reg-issue'
-                      ? doIssueCols
-                      : activeReportId === 'dlr-rep-food'
-                        ? foodDealerCols
-                        : omsDealerCols;
-                  const setSelectedList =
-                    activeReportId === 'do-reg-issue'
-                      ? setDoIssueCols
-                      : activeReportId === 'dlr-rep-food'
-                        ? setFoodDealerCols
-                        : setOmsDealerCols;
-                  const checked = selectedList.includes(def.key);
-                  return (
-                    <label
-                      key={def.key}
-                      className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 cursor-pointer font-semibold ${
-                        checked
-                          ? 'border-rose-300 bg-rose-50/70 text-[#E2136E]'
-                          : 'border-slate-200 bg-slate-50 text-slate-600'
-                      }`}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={() => togglePickerCol(setSelectedList, def.key)}
-                      />
-                      <span>{def.label}</span>
+                ) : (
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                      উপ-বরাদ্দের স্মারক নম্বর
                     </label>
-                  );
-                })}
+                    <select
+                      value={selectedOmsMemo}
+                      onChange={(e) => setSelectedOmsMemo(e.target.value)}
+                      className="w-full sm:max-w-lg min-h-[42px] rounded-xl border border-slate-300 px-3 py-1.5 bg-white font-bold"
+                    >
+                      {omsMemos.length === 0 ? (
+                        <option value="">নির্বাচিত মাসে কোনো উপবরাদ্দ নেই</option>
+                      ) : (
+                        omsMemos.map((m) => (
+                          <option key={m.memo || m.date} value={m.memo}>
+                            {m.memo ? toBnDigits(m.memo) : 'স্মারকহীন'} ({formatBnDate(m.date)} · {formatBnInt(m.count)} জন · {formatBnQty(m.totalQty)} মে.টন)
+                          </option>
+                        ))
+                      )}
+                    </select>
+                  </div>
+                )}
               </div>
-            </div>
-          )}
-        </div>
+            )}
+          </div>
+        )}
       </div>
 
       {activeReportId === 'monthly-dist' && pendingAllocRows.length > 0 && (
@@ -1532,6 +1717,11 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
           officer={db.officer}
           subjectResolved={reportPayload.subjectResolved}
           introResolved={reportPayload.introResolved}
+          conditionsResolved={reportPayload.conditionsResolved}
+          copyMemoResolved={reportPayload.copyMemoResolved}
+          copyListResolved={reportPayload.copyListResolved}
+          copyDateResolved={reportPayload.copyDateResolved}
+          hideTopMemoRow={reportPayload.hideTopMemoRow}
           memoNo={currentMemoNo}
           memoDate={currentMemoDate}
           onSaveMemo={(no, dt) => onSaveReportMemo(memoKey, no, dt)}

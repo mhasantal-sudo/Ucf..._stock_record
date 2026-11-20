@@ -12,7 +12,8 @@ export type AllocationCategory =
   | 'কাবিখা সাধারণ গম'
   | 'কাবিখা বিশেষ চাল'
   | 'কাবিখা বিশেষ গম'
-  | 'ভিডাব্লিউভি';
+  | 'ভিডাব্লিউভি'
+  | 'কার্নেল';
 
 export type GrainType = 'চাল' | 'গম' | 'আটা' | 'কার্নেল';
 
@@ -45,6 +46,9 @@ export type ReportTemplateId =
   | 'monthly-cash'
   | 'monthly-ep'
   | 'alloc-food'
+  | 'alloc-oms-gen'
+  | 'alloc-oms-spc'
+  | 'alloc-oms-tcb'
   | 'do-reg-book'
   | 'do-reg-issue'
   | 'do-reg-unused'
@@ -116,6 +120,19 @@ export const CATEGORIES: CategoryMeta[] = [
     supportsProjects: false,
     hasPhase: false,
     defaultGrain: 'চাল',
+    groupLabel: 'ডিলার খাত',
+  },
+  {
+    id: 'cat-kernel',
+    category: 'কার্নেল',
+    shortLabel: 'কার্নেল',
+    regId: 'reg-kernel',
+    flowType: 'dealer_food',
+    requiresDC: true,
+    requiresChallan: false,
+    supportsProjects: false,
+    hasPhase: false,
+    defaultGrain: 'কার্নেল',
     groupLabel: 'ডিলার খাত',
   },
   {
@@ -309,6 +326,7 @@ export interface DealerSuballocation {
   salesCenter: string;
   cardCount: number;
   unusedCards: number;
+  openingStock?: number;
   allocationQty: number;
   totalAmount: number;
   taxAmount: number;
@@ -404,6 +422,7 @@ export interface FoodDealer {
   unionName: string;
   salesCenter: string;
   cardCount: number;
+  tcbCardCount?: number;
   totalQty: number;
   poNo: string;
   poDate: string;
@@ -424,6 +443,7 @@ export interface OMSDealer {
   unionName: string;
   municipality: string;
   salesCenter: string;
+  tcbCardCount?: number;
   poNo: string;
   poDate: string;
   bankName: string;
@@ -455,6 +475,39 @@ export interface CategoryRate {
   category: AllocationCategory;
   unitPrice: number;
   taxRate: number;
+}
+
+export type MillerRecipientRole = 'mill' | 'miller' | 'owner' | 'representative';
+
+export interface MillerEntry {
+  id: string;
+  millerName: string;
+  millName: string;
+  ownerName: string;
+  representativeName: string;
+  recipientRole?: MillerRecipientRole;
+  mobile: string;
+  unionName: string;
+  address: string;
+  licenseNo?: string;
+  note?: string;
+}
+
+export interface AllocOrderFormFields {
+  ministryDate: string;
+  ministryMemo: string;
+  dcDate: string;
+  dcMemo: string;
+  dfcMonth: string;
+  dfcDate: string;
+  dfcMemo: string;
+  targetMonth: string;
+  deadlineDate: string;
+  ownMemoSuffix: string;
+  bangabdaDate: string;
+  ownDate: string;
+  copyMillerText: string;
+  openingStockByRow?: Record<string, string>;
 }
 
 export interface OfficerProfileSettings {
@@ -502,6 +555,8 @@ export interface ReportTemplateConfig {
   showCopySignature: boolean;
   copySignLines: string;
   signLines: string;
+  conditionsText?: string;
+  hideTopMemoRow?: boolean;
   footerNote: string;
   orientation: 'landscape' | 'portrait';
   marginTopMm: number;
@@ -545,10 +600,12 @@ export interface AllocationDatabase {
   omsDealers: OMSDealer[];
   chairmen: ChairmanEntry[];
   fireServices: FireServiceEntry[];
+  millers: MillerEntry[];
   rates: CategoryRate[];
   officer: OfficerProfileSettings;
   templates: Record<ReportTemplateId, ReportTemplateConfig>;
   reportMemos: Record<string, { no: string; date: string }>;
+  allocOrderForms?: Record<string, AllocOrderFormFields>;
 }
 
 export interface AllocationDbSnapshot {
@@ -589,7 +646,17 @@ export const REPORT_TEMPLATE_CATALOG: TemplateCatalogItem[] = [
   { id: 'alloc-summary', label: 'বরাদ্দ ও বিতরণ স্থিতি', kind: 'report', defaultOrientation: 'portrait', defaultSubject: 'খাত ভিত্তিক প্রাপ্ত বরাদ্দ, উপবরাদ্দ, ডিও ইস্যু ও অবশিষ্ট স্থিতির বিবরণী।' },
   { id: 'monthly-cash', label: 'নগদ বিক্রয় রিপোর্ট', kind: 'report', defaultOrientation: 'portrait', defaultSubject: 'নগদ মূল্যে বিক্রিত খাদ্য শস্যের মাসিক হিসাব বিবরণী।' },
   { id: 'monthly-ep', label: 'ইপি রেশন রিপোর্ট', kind: 'report', defaultOrientation: 'portrait', defaultSubject: 'ইপি গ্রাহকদের অনুকূলে সরবরাহকৃত রেশনের (চাল ও গম) পরিমাণ।' },
-  { id: 'alloc-food', label: 'খাদ্য বান্ধব বরাদ্দাদেশ', kind: 'report', defaultOrientation: 'landscape', defaultSubject: 'খাদ্য বান্ধব কর্মসূচির {মাস} {বছর} মাসের উপবরাদ্দ আদেশ।' },
+  { id: 'alloc-food', label: 'খাদ্য বান্ধব বরাদ্দাদেশ', kind: 'report', defaultOrientation: 'landscape', defaultSubject: '' },
+  { id: 'alloc-oms-gen', label: 'ওএমএস (সাধারণ) বরাদ্দাদেশ', kind: 'report', defaultOrientation: 'portrait', defaultSubject: '' },
+  { id: 'alloc-oms-spc', label: 'ওএমএস (বিশেষ) বরাদ্দাদেশ', kind: 'report', defaultOrientation: 'portrait', defaultSubject: '' },
+  {
+    id: 'alloc-oms-tcb',
+    label: 'ওএমএস (টিসিবি) বরাদ্দাদেশ',
+    kind: 'report',
+    defaultOrientation: 'landscape',
+    defaultSubject:
+      "টিসিবির উপকারভোগী স্মার্ট কার্ডধারীদের নিকট টিসিবি'র পণ্য বিক্রয়ের সাথে খাদ্য অধিদপ্তরের ওএমএস চাল বিক্রয়ের নিমিত্ত {মাস_বক্স} মাসের চালের উপ-বরাদ্দ প্রদান প্রসঙ্গে।",
+  },
   { id: 'do-reg-book', label: 'ডিও বই রেজিস্ট্রার', kind: 'report', defaultOrientation: 'portrait', defaultSubject: 'ডিও বই ও পাতার হিসাব বিবরণী রেজিস্টার' },
   { id: 'do-reg-issue', label: 'ডিও ইস্যু রেজিস্টার', kind: 'report', defaultOrientation: 'landscape', defaultSubject: 'তারিখ ভিত্তিক ডিও ইস্যু রেজিস্টার' },
   { id: 'do-reg-unused', label: 'অব্যবহৃত ডিও তালিকা', kind: 'report', defaultOrientation: 'portrait', defaultSubject: 'ডিও বই অনুযায়ী অব্যবহৃত ডিও পাতার তালিকা' },
@@ -621,6 +688,74 @@ export function createDefaultTemplate(
   officer: OfficerProfileSettings = DEFAULT_OFFICER_PROFILE
 ): ReportTemplateConfig {
   const isAllocFood = item.id === 'alloc-food';
+  const isAllocOmsGen = item.id === 'alloc-oms-gen';
+  const isAllocOmsSpc = item.id === 'alloc-oms-spc';
+  const isAllocOmsTcb = item.id === 'alloc-oms-tcb';
+  const isAnyAllocOrder = isAllocFood || isAllocOmsGen || isAllocOmsSpc || isAllocOmsTcb;
+
+  const defaultReportTitle = isAllocOmsTcb ? 'অফিস আদেশ' : item.label;
+
+  const defaultIntroText = isAllocFood
+    ? 'খাদ্য মন্ত্রণালয়ের {মন্ত্রণালয়_তারিখ} খ্রিঃ তারিখের {মন্ত্রণালয়_স্মারক} নং স্মারক পত্রের এবং জেলা খাদ্য নিয়ন্ত্রক, বরিশাল-এর {ডিএফসি_মাস} মাসের {ডিএফসি_স্মারক} নং স্মারকের আদেশ মোতাবেক জানানো যাচ্ছে যে, {মাস_বক্স} মাসের জন্য উজিরপুর উপজেলার খাদ্য বান্ধব কর্মসূচির ডিলারদের অনুকূলে নিম্নবর্ণিত ছক মোতাবেক চাল উপবরাদ্দ প্রদান করা হলো। নির্ধারিত সময়ের মধ্যে ট্রেজারি চালানের মাধ্যমে অর্থ জমা পূর্বক ডিও গ্রহণের জন্য নির্দেশক্রমে অনুরোধ করা হলো।'
+    : isAllocOmsTcb
+      ? 'জেলা প্রশাসকের কার্যালয়, বরিশাল (ব্যবসা, বাণিজ্য ও বিনিয়োগ শাখা)-এর {ডিসি_তারিখ} খ্রি. তারিখের {ডিসি_স্মারক} নং স্মারক এবং জেলা খাদ্য নিয়ন্ত্রকের কার্যালয়, বরিশাল-এর {ডিএফসি_তারিখ} খ্রি. তারিখের {ডিএফসি_স্মারক} নং স্মারক পত্রদ্বয়ের নির্দেশনার পরিপ্রেক্ষিতে জানানো যাচ্ছে যে, উজিরপুর উপজেলার ০৯টি ইউনিয়ন ও ০১টি পৌরসভার টিসিবির উপকারভোগী স্মার্ট কার্ডধারীদের নিকট টিসিবি\'র পণ্যের সাথে ভর্তুকি মূল্যে চাল বিক্রয়ের নিমিত্ত {মাস_বক্স} মাসের জন্য বর্তমান এক্টিভেটেড কার্ডের বিপরীতে কার্ডপ্রতি ০৫ (পাঁচ) কেজি হারে ওএমএস চাল নিম্নবর্ণিত ছক অনুযায়ী মনোনীত খাদ্যবান্ধব/ওএমএস ডিলারগণের অনুকূলে উপ-বরাদ্দ প্রদান করা হলো:'
+      : isAllocOmsSpc
+        ? 'খাদ্য মন্ত্রণালয়ের {মন্ত্রণালয়_তারিখ} খ্রিঃ তারিখের {মন্ত্রণালয়_স্মারক} নং স্মারক পত্রের এবং জেলা খাদ্য নিয়ন্ত্রক, বরিশাল-এর {ডিএফসি_মাস} মাসের {ডিএফসি_স্মারক} নং স্মারকের আদেশ মোতাবেক জানানো যাচ্ছে যে, {মাস_বক্স} মাসের জন্য উজিরপুর উপজেলার ওএমএস (বিশেষ) কার্যক্রমের পণ্য বিক্রয়ের নিমিত্ত ডিলারদের অনুকূলে নিম্নবর্ণিত ছক মোতাবেক চাল উপবরাদ্দ প্রদান করা হলো। নির্ধারিত সময়ের মধ্যে ট্রেজারি চালানের মাধ্যমে অর্থ জমা পূর্বক ডিও গ্রহণের জন্য নির্দেশক্রমে অনুরোধ করা হলো।'
+        : isAllocOmsGen
+          ? 'খাদ্য মন্ত্রণালয়ের {মন্ত্রণালয়_তারিখ} খ্রিঃ তারিখের {মন্ত্রণালয়_স্মারক} নং স্মারক পত্রের এবং জেলা খাদ্য নিয়ন্ত্রক, বরিশাল-এর {ডিএফসি_মাস} মাসের {ডিএফসি_স্মারক} নং স্মারকের আদেশ মোতাবেক জানানো যাচ্ছে যে, {মাস_বক্স} মাসের জন্য উজিরপুর উপজেলার ওএমএস (সাধারণ) কার্যক্রমের পণ্য বিক্রয়ের নিমিত্ত ডিলারদের অনুকূলে নিম্নবর্ণিত ছক মোতাবেক চাল উপবরাদ্দ প্রদান করা হলো। নির্ধারিত সময়ের মধ্যে ট্রেজারি চালানের মাধ্যমে অর্থ জমা পূর্বক ডিও গ্রহণের জন্য নির্দেশক্রমে অনুরোধ করা হলো।'
+          : '';
+
+  const defaultConditionsText = isAllocOmsTcb
+    ? [
+        'শর্তাবলি:',
+        '১। সংশ্লিষ্ট ডিলারগণকে আগামী {শেষ_তারিখ} খ্রি. তারিখের মধ্যে নির্ধারিত কোডে চালের মূল্য ও আয়করের টাকা ট্রেজারি চালানের মাধ্যমে জমা প্রদানপূর্বক অত্র কার্যালয় হতে ডিও (DO) গ্রহণ করে শিকারপুর এলএসডি হতে চাল উত্তোলন নিশ্চিত করতে হবে।',
+        '২। পরবর্তীতে টিসিবি ডিলারগণের উপকারভোগীর চাহিদা অনুযায়ী সংশ্লিষ্ট টিসিবি ডিলারদের অনুকূলে চাল সরবরাহ করতে হবে।',
+        '৩। এ বিষয়ে কোনো প্রকার অনিয়ম পরিলক্ষিত হলে প্রচলিত বিধি মোতাবেক আইনানুগ ব্যবস্থা গ্রহণ করা হবে।',
+      ].join('\n')
+    : '';
+
+  const defaultCopyTitle = isAllocOmsTcb
+    ? 'অনুলিপি: সদয় অবগতি ও প্রয়োজনীয় কার্যার্থে প্রেরণ করা হলো (জ্যেষ্ঠতার ক্রমানুসারে নয়):'
+    : 'সদয় অবগতি ও প্রয়োজনীয় কার্যার্থে অনুলিপি প্রেরণ করা হলোঃ';
+
+  const defaultCopyList = isAllocFood
+    ? [
+        'আঞ্চলিক খাদ্য নিয়ন্ত্রক, বরিশাল।',
+        'জেলা খাদ্য নিয়ন্ত্রক, বরিশাল।',
+        'উপজেলা নির্বাহী অফিসার, উজিরপুর, বরিশাল।',
+        'সংশ্লিষ্ট মিল মালিক {মিল_মালিক}',
+        'ভারপ্রাপ্ত কর্মকর্তা, এলএসডি, শিকারপুর, উজিরপুর, বরিশাল।',
+        'সংশ্লিষ্ট ডিলার, উজিরপুর, বরিশাল (আদেশ পালনার্থে)।',
+        'অফিস কপি।',
+      ].join('\n')
+    : isAllocOmsTcb
+      ? [
+          'আঞ্চলিক খাদ্য নিয়ন্ত্রক, বরিশাল।',
+          'জেলা প্রশাসক, বরিশাল (সদয় অবগতির জন্য)।',
+          'জেলা খাদ্য নিয়ন্ত্রক, বরিশাল।',
+          'উপজেলা নির্বাহী অফিসার, উজিরপুর, বরিশাল (সদয় অবগতির জন্য)।',
+          'ভারপ্রাপ্ত কর্মকর্তা, শিকারপুর এলএসডি, উজিরপুর, বরিশাল।',
+          'সংশ্লিষ্ট ডিলার, ......... বিক্রয় কেন্দ্র, উজিরপুর, বরিশাল (আদেশ পালনার্থে)।',
+          'সংশ্লিষ্ট টিসিবি ডিলার, উজিরপুর, বরিশাল।',
+          'অফিস কপি।',
+        ].join('\n')
+      : isAllocOmsGen || isAllocOmsSpc
+        ? [
+            'আঞ্চলিক খাদ্য নিয়ন্ত্রক, বরিশাল।',
+            'জেলা খাদ্য নিয়ন্ত্রক, বরিশাল।',
+            'উপজেলা নির্বাহী অফিসার, উজিরপুর, বরিশাল।',
+            'ভারপ্রাপ্ত কর্মকর্তা, এলএসডি, শিকারপুর, উজিরপুর, বরিশাল।',
+            'সংশ্লিষ্ট ডিলার, উজিরপুর, বরিশাল (আদেশ পালনার্থে)।',
+            'অফিস কপি।',
+          ].join('\n')
+        : [
+            'জেলা প্রশাসক, বরিশাল।',
+            'জেলা খাদ্য নিয়ন্ত্রক, বরিশাল।',
+            'উপজেলা নির্বাহী অফিসার, উজিরপুর, বরিশাল।',
+            'ভারপ্রাপ্ত কর্মকর্তা, এলএসডি, শিকারপুর, উজিরপুর, বরিশাল।',
+            'সংশ্লিষ্ট ডিলার / ইউনিয়ন পরিষদ চেয়ারম্যান।',
+          ].join('\n');
+
   return {
     id: item.id,
     label: item.label,
@@ -629,29 +764,21 @@ export function createDefaultTemplate(
     office1: officer.officeLine1,
     office2: officer.officeLine2,
     office3: officer.officeLine3,
-    reportTitle: item.label,
+    reportTitle: defaultReportTitle,
     subject: item.defaultSubject,
     memoPrefix: '১৩.০১.০৬৯৪.০০৭.১৬.০১৭.০৯-',
     memoLabel: 'স্মারক নংঃ ',
     dateLabel: 'তারিখঃ',
     dateSuffix: 'খ্রিঃ',
     recipientLines: `${officer.recvName}\n${officer.recvDesig}\n${officer.recvPlace}`,
-    introText: isAllocFood
-      ? 'উপর্যুক্ত বিষয় ও সূত্রের প্রেক্ষিতে জানানো যাচ্ছে যে, {মাস} {বছর} মাসের জন্য উজিরপুর উপজেলার খাদ্য বান্ধব কর্মসূচির ডিলারদের অনুকূলে নিম্নবর্ণিত ছক মোতাবেক চাল উপবরাদ্দ প্রদান করা হলো। নির্ধারিত সময়ের মধ্যে ট্রেজারি চালানের মাধ্যমে অর্থ জমা পূর্বক ডিও গ্রহণের জন্য নির্দেশক্রমে অনুরোধ করা হলো।'
-      : '',
+    introText: defaultIntroText,
     namePrefix: isAllocFood ? 'জনাব, ' : '',
     totalLabel: 'সর্বমোট',
-    copyTitle: 'সদয় অবগতি ও প্রয়োজনীয় কার্যার্থে অনুলিপি প্রেরণ করা হলোঃ',
-    copyList: [
-      'জেলা প্রশাসক, বরিশাল।',
-      'জেলা খাদ্য নিয়ন্ত্রক, বরিশাল।',
-      'উপজেলা নির্বাহী অফিসার, উজিরপুর, বরিশাল।',
-      'ভারপ্রাপ্ত কর্মকর্তা, এলএসডি, শিকারপুর, উজিরপুর, বরিশাল।',
-      'সংশ্লিষ্ট ডিলার / ইউনিয়ন পরিষদ চেয়ারম্যান।',
-    ].join('\n'),
-    showCopyBlock: isAllocFood,
+    copyTitle: defaultCopyTitle,
+    copyList: defaultCopyList,
+    showCopyBlock: isAnyAllocOrder,
     showCopyMemo: true,
-    copyMemoText: '',
+    copyMemoText: isAnyAllocOrder ? 'স্মারক নং- ১৩.০১.০৬৯৪.০০৭.১৬.০১৭.০৯-{স্মারক_শেষ}' : '',
     showCopySignature: true,
     copySignLines: [officer.officerName, officer.officerDesignation, officer.officerPlace]
       .filter(Boolean)
@@ -659,13 +786,15 @@ export function createDefaultTemplate(
     signLines: [officer.officerName, officer.officerDesignation, officer.officerPlace]
       .filter(Boolean)
       .join('\n'),
+    conditionsText: defaultConditionsText,
+    hideTopMemoRow: isAnyAllocOrder,
     footerNote: '',
     orientation: item.defaultOrientation,
     marginTopMm: 10,
     marginRightMm: 10,
     marginBottomMm: 10,
     marginLeftMm: 10,
-    fontSizePt: item.kind === 'register' ? 9.5 : 10.5,
+    fontSizePt: item.kind === 'register' ? 9.5 : isAnyAllocOrder ? 10 : 10.5,
     showSignature: true,
     signatureHeightPx:
       item.kind === 'register'

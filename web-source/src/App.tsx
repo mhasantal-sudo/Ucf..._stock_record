@@ -43,7 +43,6 @@ import { AllocationSettingsView, type SettingsTabKey } from './components/Alloca
 import { CategoryEntryView, type EntryStageKey } from './components/CategoryEntryView';
 import { DOWorkspaceView, type DOTabKey } from './components/DOWorkspaceView';
 import { DashboardView } from './components/DashboardView';
-import { KernelEntryView } from './components/KernelEntryView';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { PendingProjectsWorkspace } from './components/PendingProjectsWorkspace';
@@ -84,6 +83,7 @@ const CATEGORY_ICON_STYLE: Record<
   'কাবিখা বিশেষ চাল': { icon: Hammer, bg: 'bg-cyan-50 border-cyan-200', fg: 'text-cyan-700' },
   'কাবিখা বিশেষ গম': { icon: Hammer, bg: 'bg-slate-100 border-slate-300', fg: 'text-slate-700' },
   'ভিডাব্লিউভি': { icon: Sparkles, bg: 'bg-fuchsia-50 border-fuchsia-200', fg: 'text-fuchsia-700' },
+  'কার্নেল': { icon: Wheat, bg: 'bg-emerald-50 border-emerald-200', fg: 'text-emerald-700' },
 };
 
 function getCategoriesForStage(stage: TopStageKey) {
@@ -133,11 +133,10 @@ function MainApplication() {
   const [section, setSection] = useState<MainSection>('entry');
   const [activeStage, setActiveStage] = useState<TopStageKey>('ministry');
 
-  // Entry view, Kernel entry & Pending Projects workspace
+  // Entry view & Pending Projects workspace
   const [selectedEntryCat, setSelectedEntryCat] = useState<AllocationCategory | null>(null);
   const [lockedEntryStage, setLockedEntryStage] = useState<EntryStageKey | null>(null);
   const [entryJumpMemo, setEntryJumpMemo] = useState<{ memoNo: string; stage?: EntryStageKey } | null>(null);
-  const [showKernelEntry, setShowKernelEntry] = useState(false);
   const [showPendingWorkspace, setShowPendingWorkspace] = useState(false);
   const [isProjectUnlocked, setIsProjectUnlocked] = useState(false);
 
@@ -177,12 +176,7 @@ function MainApplication() {
   const [isDraggingPager, setIsDraggingPager] = useState(false);
 
   const stageCategories = useMemo(() => getCategoriesForStage(activeStage), [activeStage]);
-  const kernelEntryCount = useMemo(
-    () => store.db.ministryAllocations.filter((m) => m.grain === 'কার্নেল').length,
-    [store.db.ministryAllocations]
-  );
-  const isHomeGridVisible =
-    section === 'entry' && !selectedEntryCat && !showPendingWorkspace && !showKernelEntry;
+  const isHomeGridVisible = section === 'entry' && !selectedEntryCat && !showPendingWorkspace;
 
   useEffect(() => {
     const scale = Math.max(85, Math.min(135, store.db.officer.uiFontScale ?? 108));
@@ -301,13 +295,13 @@ function MainApplication() {
       }
     }
 
-    // 2. From DC allocations -> pending in UNO (Relief/Kabikha) or UCF (OMS TCB)
+    // 2. From DC allocations -> pending in UNO (Relief/Kabikha) or UCF (OMS TCB / Kernel)
     for (const d of store.db.dcAllocations) {
       const meta = CATEGORY_BY_NAME[d.category];
       if (!meta) continue;
       const usage = store.getDCUsage(d.category, d.dcMemo);
       const rem = Math.max(0, usage.remaining);
-      if (meta.flowType === 'dealer_oms') {
+      if (meta.flowType === 'dealer_oms' || meta.flowType === 'dealer_food' || meta.flowType === 'ep') {
         byStage.ucf[d.category] = round3((byStage.ucf[d.category] || 0) + rem);
       } else if (meta.flowType === 'relief' || meta.flowType === 'kabikha') {
         byStage.uno[d.category] = round3((byStage.uno[d.category] || 0) + rem);
@@ -418,23 +412,12 @@ function MainApplication() {
     setSelectedEntryCat(null);
     setLockedEntryStage(null);
     setEntryJumpMemo(null);
-    setShowKernelEntry(false);
     setShowPendingWorkspace(true);
-    setSection('entry');
-  };
-
-  const handleOpenKernelEntry = () => {
-    setSelectedEntryCat(null);
-    setLockedEntryStage(null);
-    setEntryJumpMemo(null);
-    setShowPendingWorkspace(false);
-    setShowKernelEntry(true);
     setSection('entry');
   };
 
   const handleOpenCategoryFromDashboard = (cat: AllocationCategory) => {
     setShowPendingWorkspace(false);
-    setShowKernelEntry(false);
     setEntryJumpMemo(null);
     setLockedEntryStage(null);
     setSelectedEntryCat(cat);
@@ -461,7 +444,6 @@ function MainApplication() {
   const handleSwitchSection = (target: MainSection) => {
     setTemplateEditReturnTo(null);
     setShowPendingWorkspace(false);
-    setShowKernelEntry(false);
     setEntryJumpMemo(null);
     setSection(target);
     if (target === 'entry') {
@@ -869,28 +851,6 @@ function MainApplication() {
                   }}
                   onBack={() => setShowPendingWorkspace(false)}
                 />
-              ) : showKernelEntry ? (
-                <KernelEntryView
-                  db={store.db}
-                  onBack={() => setShowKernelEntry(false)}
-                  getMinistryUsage={store.getMinistryUsage}
-                  onAddMinistry={store.addMinistryAllocation}
-                  onUpdateMinistry={store.updateMinistryAllocation}
-                  onDeleteMinistry={store.deleteMinistryAllocation}
-                  onJumpToCategory={(cat, stage, memoNo) => {
-                    setShowKernelEntry(false);
-                    setLockedEntryStage(stage);
-                    setEntryJumpMemo({ memoNo, stage });
-                    setSelectedEntryCat(cat);
-                    setSection('entry');
-                  }}
-                  onOpenKernelRegister={() => {
-                    setShowKernelEntry(false);
-                    setActiveRegisterId('reg-kernel');
-                    setRegisterOpenTrigger((n) => n + 1);
-                    setSection('registers');
-                  }}
-                />
               ) : selectedEntryCat ? (
                 <CategoryEntryView
                   db={store.db}
@@ -926,6 +886,7 @@ function MainApplication() {
                   onIssueDOBatch={store.issueDOBatch}
                   onUpdateDOIssue={store.updateDOIssue}
                   onDeleteDOIssue={store.deleteDOIssue}
+                  onRelinkChallan={store.relinkChallan}
                   onOpenRegister={(regId) => {
                     setActiveRegisterId(regId);
                     setRegisterOpenTrigger((n) => n + 1);
@@ -1000,19 +961,6 @@ function MainApplication() {
                           </button>
                         );
                       })}
-
-                      {/* Direct Top Menu Bar Button for Kernel Entry */}
-                      <button
-                        type="button"
-                        onClick={handleOpenKernelEntry}
-                        className="min-h-[44px] shrink-0 whitespace-nowrap inline-flex items-center gap-1.5 rounded-full px-4 py-2 text-xs sm:text-sm font-bold border border-emerald-300 bg-emerald-50 text-emerald-950 hover:bg-emerald-100 shadow-xs transition-all cursor-pointer"
-                      >
-                        <Wheat className="h-4 w-4 text-emerald-700 shrink-0" />
-                        <span>কার্নেল এন্ট্রি</span>
-                        <span className="inline-flex items-center rounded-full bg-emerald-700 text-white px-1.5 py-0.5 text-[10px] font-bold leading-none tabular-nums">
-                          {toBnDigits(kernelEntryCount)}টি
-                        </span>
-                      </button>
 
                       {/* Direct Top Menu Bar Button for Pending Projects */}
                       <button
@@ -1187,24 +1135,6 @@ function MainApplication() {
                     <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
                       <button
                         type="button"
-                        onClick={handleOpenKernelEntry}
-                        className="min-h-[68px] flex items-center gap-2.5 rounded-2xl border border-emerald-300 bg-emerald-50/80 p-3 text-left hover:border-emerald-400 hover:bg-emerald-100/70 transition-colors cursor-pointer"
-                      >
-                        <span className="h-10 w-10 rounded-full bg-emerald-700 text-white flex items-center justify-center shrink-0">
-                          <Wheat className="h-5 w-5" />
-                        </span>
-                        <span className="min-w-0">
-                          <span className="block text-xs font-bold text-slate-900 leading-snug">
-                            কার্নেল এন্ট্রি
-                          </span>
-                          <span className="block text-[10.5px] font-bold text-emerald-800 tabular-nums mt-0.5">
-                            খাদ্য বান্ধব ও ভিডাব্লিউভি ({toBnDigits(kernelEntryCount)}টি)
-                          </span>
-                        </span>
-                      </button>
-
-                      <button
-                        type="button"
                         onClick={handleOpenPendingWorkspace}
                         className="min-h-[68px] flex items-center gap-2.5 rounded-2xl border border-amber-300 bg-amber-50/80 p-3 text-left hover:border-amber-400 hover:bg-amber-100/70 transition-colors cursor-pointer"
                       >
@@ -1325,6 +1255,7 @@ function MainApplication() {
               onIssueDOBatch={store.issueDOBatch}
               onUpdateDOIssue={store.updateDOIssue}
               onDeleteDOIssue={store.deleteDOIssue}
+              onRelinkChallan={store.relinkChallan}
             />
           )}
 
@@ -1347,6 +1278,7 @@ function MainApplication() {
               activeReportId={activeReportId}
               onSelectReport={setActiveReportId}
               onSaveReportMemo={store.saveReportMemo}
+              onSaveAllocOrderForm={store.saveAllocOrderForm}
               onEditTemplate={(tplId) => handleEditTemplate(tplId, 'reports')}
               onChangeOrientation={handleChangeOrientation}
             />
@@ -1393,10 +1325,13 @@ function MainApplication() {
               onDeleteFoodDealer={store.deleteFoodDealer}
               onSaveOMSDealer={store.saveOMSDealer}
               onDeleteOMSDealer={store.deleteOMSDealer}
+              onUpdateDealerTcbCards={store.updateDealerTcbCards}
               onSaveChairman={store.saveChairman}
               onDeleteChairman={store.deleteChairman}
               onSaveFireService={store.saveFireService}
               onDeleteFireService={store.deleteFireService}
+              onSaveMiller={store.saveMiller}
+              onDeleteMiller={store.deleteMiller}
               onSaveRate={store.saveRate}
               onExportBackup={store.exportBackupJson}
               onImportBackup={store.importBackupJson}

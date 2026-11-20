@@ -20,7 +20,7 @@ import {
 } from 'lucide-react';
 import { CATEGORIES, type AllocationCategory, type AllocationDatabase } from '../types/allocation';
 import { getPendingDORecipients } from '../shared/allocReportEngine';
-import { formatBnInt, formatBnMoney, formatBnQty, round3, toBnDigits } from '../shared/bnUtils';
+import { formatBnInt, formatBnMoney, formatBnQty, normDoNo, round3, toBnDigits } from '../shared/bnUtils';
 
 interface DashboardViewProps {
   db: AllocationDatabase;
@@ -137,6 +137,13 @@ const CAT_VISUAL_META: Record<
     fg: 'text-fuchsia-700',
     barHex: '#a21caf',
   },
+  'কার্নেল': {
+    icon: Wheat,
+    microLabel: 'কার্নেল',
+    bg: 'bg-emerald-50 border-emerald-200',
+    fg: 'text-emerald-700',
+    barHex: '#047857',
+  },
 };
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
@@ -160,7 +167,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     const totalDeposited = db.challans.reduce((s, c) => s + (c.depositedAmount || 0), 0);
     const totalRecorded = db.challans.reduce((s, c) => s + (c.recordedAmount || 0), 0);
 
-    const usedDoNos = new Set(db.doIssues.map((d) => String(d.doNo).trim()));
+    const usedDoNos = new Set(db.doIssues.map((d) => normDoNo(d.doNo)).filter(Boolean));
     const totalBookPages = db.doBooks.reduce((s, b) => s + (b.totalCount || 0), 0);
     const remainingBookPages = Math.max(0, totalBookPages - usedDoNos.size);
 

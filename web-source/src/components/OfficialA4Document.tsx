@@ -59,6 +59,11 @@ export interface OfficialA4DocumentProps {
   officer: OfficerProfileSettings;
   subjectResolved?: string;
   introResolved?: string;
+  conditionsResolved?: string;
+  copyMemoResolved?: string;
+  copyListResolved?: string;
+  copyDateResolved?: string;
+  hideTopMemoRow?: boolean;
   memoNo?: string;
   memoDate?: string;
   onSaveMemo?: (no: string, date: string) => void;
@@ -117,6 +122,29 @@ function clampMm(v: number, fallback = 10): number {
   const n = Number(v);
   if (!Number.isFinite(n)) return fallback;
   return Math.max(2, Math.min(35, n));
+}
+
+function renderBoxedBn(text: string | undefined): React.ReactNode {
+  if (!text) return null;
+  const parts = text.split(/(\[\[[\s\S]*?\]\])/g);
+  if (parts.length === 1) {
+    return toBnDigits(text);
+  }
+  return parts.map((part, idx) => {
+    if (part.startsWith('[[') && part.endsWith(']]')) {
+      const inner = part.slice(2, -2);
+      const display = inner.trim() ? toBnDigits(inner) : '\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0';
+      return (
+        <span
+          key={idx}
+          className="inline-block border border-slate-900 px-1.5 py-[0.5px] min-w-[44px] text-center align-baseline mx-0.5 leading-snug bg-white"
+        >
+          {display}
+        </span>
+      );
+    }
+    return <React.Fragment key={idx}>{toBnDigits(part)}</React.Fragment>;
+  });
 }
 
 function getGroupColSpans(columns: DocColumnGroup[]): {
@@ -225,6 +253,11 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
       officer,
       subjectResolved,
       introResolved,
+      conditionsResolved,
+      copyMemoResolved,
+      copyListResolved,
+      copyDateResolved,
+      hideTopMemoRow,
       memoNo,
       memoDate,
       onSaveMemo,
@@ -638,6 +671,11 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
       showOfficerSignatureBlock,
       subjectResolved,
       introResolved,
+      conditionsResolved,
+      copyMemoResolved,
+      copyListResolved,
+      copyDateResolved,
+      hideTopMemoRow,
       resolvedColWidths,
       tableLayoutFixed,
       footerLayout,
@@ -806,7 +844,7 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
           )}
         </div>
 
-        {(showRecipientBlock || memoNo !== undefined) && (
+        {!(hideTopMemoRow ?? template.hideTopMemoRow) && (showRecipientBlock || memoNo !== undefined) && (
           <div
             style={{ fontSize: `${fontPt}pt` }}
             className={`flex justify-between items-baseline border-b border-slate-300 ${
@@ -827,7 +865,7 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
         {(subjectResolved || template.subject) && (
           <div style={{ fontSize: `${fontPt}pt` }} className={`${compactSinglePage ? 'mb-1' : 'mb-1.5'} leading-snug`}>
             <span className="font-bold">বিষয়ঃ </span>
-            <span>{toBnDigits(subjectResolved || template.subject)}</span>
+            <span>{renderBoxedBn(subjectResolved || template.subject)}</span>
           </div>
         )}
 
@@ -836,7 +874,7 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
             style={{ fontSize: `${fontPt}pt` }}
             className={`${compactSinglePage ? 'mb-1' : 'mb-2'} leading-snug text-justify whitespace-pre-line`}
           >
-            {toBnDigits(introResolved || template.introText)}
+            {renderBoxedBn(introResolved || template.introText)}
           </div>
         )}
       </div>
@@ -892,10 +930,12 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
     const renderFooterBlock = (isMeasure = false) => {
       const showSigArea = showOfficerSignatureBlock;
       const isCopyEnabled = showCopyBlock ?? template.showCopyBlock;
-      const showCopyArea = Boolean(isCopyEnabled && template.copyList.trim().length > 0);
+      const effectiveCopyList = (copyListResolved ?? template.copyList ?? '').trim();
+      const showCopyArea = Boolean(isCopyEnabled && effectiveCopyList.length > 0);
       const showRecipientArea = Boolean(showRecipientBlock && template.recipientLines.trim());
+      const resolvedConditions = (conditionsResolved ?? template.conditionsText ?? '').trim();
       const hasFooterNote = Boolean(template.footerNote?.trim());
-      if (!showSigArea && !showCopyArea && !showRecipientArea && !hasFooterNote) {
+      if (!showSigArea && !showCopyArea && !showRecipientArea && !resolvedConditions && !hasFooterNote) {
         return <div {...(isMeasure ? { 'data-measure': 'footer' } : {})} />;
       }
 
@@ -957,7 +997,7 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
 
       const activeMemoNo = memoNoDraft || template.memoPrefix;
       const formattedCopyDate = `${formatBnDate(memoDateDraft)} ${template.dateSuffix}`.trim();
-      const customCopyMemo = (template.copyMemoText || '').trim();
+      const customCopyMemo = (copyMemoResolved ?? template.copyMemoText ?? '').trim();
       const resolvedCustomCopyMemo = customCopyMemo
         ? customCopyMemo
             .replace(/\{স্মারক\}/g, activeMemoNo)
@@ -970,7 +1010,7 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
             <div className="flex justify-between items-baseline border-t border-slate-300 pt-1.5 pb-0.5">
               <div>
                 {customCopyMemo ? (
-                  <span className="font-semibold">{toBnDigits(resolvedCustomCopyMemo)}</span>
+                  <span className="font-semibold">{renderBoxedBn(resolvedCustomCopyMemo)}</span>
                 ) : (
                   <>
                     <span className="font-semibold">{template.memoLabel}</span>
@@ -980,7 +1020,7 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
               </div>
               <div>
                 <span className="font-semibold">{template.dateLabel} </span>
-                <span>{formattedCopyDate}</span>
+                <span>{copyDateResolved ? renderBoxedBn(copyDateResolved) : formattedCopyDate}</span>
               </div>
             </div>
           )}
@@ -990,13 +1030,13 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
               {toBnDigits(template.copyTitle)}
             </div>
             <ol className="list-none space-y-0.5 pl-1">
-              {template.copyList
+              {effectiveCopyList
                 .split('\n')
                 .map((l) => l.trim())
                 .filter(Boolean)
                 .map((line, i) => (
                   <li key={i}>
-                    {toBnDigits(i + 1)}। {toBnDigits(line)}
+                    {toBnDigits(i + 1)}। {renderBoxedBn(line)}
                   </li>
                 ))}
             </ol>
@@ -1012,6 +1052,12 @@ export const OfficialA4Document = React.forwardRef<OfficialA4DocumentHandle, Off
           style={{ fontSize: `${fontPt}pt` }}
           className={`${compactSinglePage ? 'mt-2 pt-1' : 'mt-4 pt-2'} font-nikosh text-slate-950`}
         >
+          {resolvedConditions && (
+            <div className="mb-3 leading-snug text-left whitespace-pre-line">
+              {renderBoxedBn(resolvedConditions)}
+            </div>
+          )}
+
           {showCopyArea ? (
             <div className={compactSinglePage ? 'space-y-1.5' : 'space-y-3'}>
               {sigAndRecipientRow}

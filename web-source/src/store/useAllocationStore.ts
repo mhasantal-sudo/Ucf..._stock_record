@@ -11,6 +11,7 @@ import {
   type AllocationDatabase,
   type AllocationDbSnapshot,
   type AllocationSheetsConfig,
+  type AllocOrderFormFields,
   type CategoryRate,
   type ChairmanEntry,
   type ChallanRecord,
@@ -20,6 +21,7 @@ import {
   type DealerSuballocation,
   type FireServiceEntry,
   type FoodDealer,
+  type MillerEntry,
   type MinistryAllocation,
   type OMSDealer,
   type OfficerProfileSettings,
@@ -58,6 +60,7 @@ import {
   namesFuzzyMatch,
   namesLikelyMatch,
   normChallanNo,
+  normDoNo,
   normMemoNo,
   parseMonthYear,
   round2,
@@ -81,12 +84,14 @@ const STORAGE_SHEETS_KEY = 'khaddo_boraddo_sheets_v1';
 const STORAGE_PENDING_PUSH_KEY = 'khaddo_boraddo_pending_push_v1';
 const STORAGE_SNAPSHOTS_KEY = 'khaddo_boraddo_snapshots_v1';
 const STORAGE_DELETED_CHALLAN_KEYS_KEY = 'khaddo_boraddo_deleted_challans_v1';
+const STORAGE_MANUAL_CHALLAN_LOCKS_KEY = 'khaddo_boraddo_manual_challan_locks_v1';
 const LEGACY_GRAIN_SHEETS_KEY = 'khaddo_stock_gsheets_config_v1';
 const PORTRAIT_MIGRATION_KEY = 'khaddo_boraddo_portrait_migrated_v1';
 const PURGE_SAMPLE_MIGRATION_KEY = 'khaddo_boraddo_purge_sample_v1';
 const CLEAN_TITLES_MIGRATION_KEY = 'khaddo_boraddo_clean_titles_v1';
 const MONTHLY_NO_COPY_MIGRATION_KEY = 'khaddo_boraddo_monthly_no_copy_v1';
 const CHALLAN_SIGN_EQUAL_MIGRATION_KEY = 'khaddo_boraddo_challan_sign_equal_v1';
+const ALLOC_ORDER_V2_MIGRATION_KEY = 'khaddo_boraddo_alloc_orders_v2';
 
 function loadInitialSnapshots(): AllocationDbSnapshot[] {
   try {
@@ -136,6 +141,74 @@ function persistDeletedChallanKeys(keys: Set<string>): void {
   } catch {
     // ignore
   }
+}
+
+interface ManualChallanLockOverride {
+  dealerAllocationId?: string;
+  doNo?: string;
+  unlocked?: boolean;
+}
+
+function getChallanLockMapKey(c: Pick<ChallanRecord, 'id' | 'challanNo' | 'challanType'>): string {
+  const n = normChallanNo(c.challanNo);
+  return n ? `${n}::${c.challanType}` : `id::${c.id}`;
+}
+
+function loadManualChallanLocks(): Record<string, ManualChallanLockOverride> {
+  try {
+    if (typeof localStorage === 'undefined') return {};
+    const raw = localStorage.getItem(STORAGE_MANUAL_CHALLAN_LOCKS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, ManualChallanLockOverride>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveManualChallanLock(
+  c: Pick<ChallanRecord, 'id' | 'challanNo' | 'challanType'>,
+  override: ManualChallanLockOverride | null
+): void {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    const all = loadManualChallanLocks();
+    const key = getChallanLockMapKey(c);
+    if (!override) {
+      delete all[key];
+    } else {
+      all[key] = override;
+    }
+    if (Object.keys(all).length === 0) {
+      localStorage.removeItem(STORAGE_MANUAL_CHALLAN_LOCKS_KEY);
+    } else {
+      localStorage.setItem(STORAGE_MANUAL_CHALLAN_LOCKS_KEY, JSON.stringify(all));
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function applyManualChallanLocks(challans: ChallanRecord[]): ChallanRecord[] {
+  const locks = loadManualChallanLocks();
+  if (Object.keys(locks).length === 0) return challans;
+  return challans.map((c) => {
+    const ov = locks[getChallanLockMapKey(c)];
+    if (!ov) return c;
+    if (ov.unlocked) {
+      return {
+        ...c,
+        dealerAllocationId: undefined,
+        doNo: undefined,
+        doDate: undefined,
+      };
+    }
+    return {
+      ...c,
+      dealerAllocationId: ov.dealerAllocationId !== undefined ? ov.dealerAllocationId : c.dealerAllocationId,
+      doNo: ov.doNo !== undefined ? ov.doNo : c.doNo,
+    };
+  });
 }
 
 function getWriteTargetKey(spreadsheetId: string, gasUrl: string): string {
@@ -256,9 +329,37 @@ function loadInitialDatabase(): AllocationDatabase {
         localStorage.setItem(CHALLAN_SIGN_EQUAL_MIGRATION_KEY, '1');
       }
 
+      if (localStorage.getItem(ALLOC_ORDER_V2_MIGRATION_KEY) !== '1') {
+        const curFood = mergedTemplates['alloc-food'];
+        if (
+          !curFood?.introText ||
+          curFood.introText.startsWith('উপর্যুক্ত বিষয় ও সূত্রের প্রেক্ষিতে জানানো যাচ্ছে যে,')
+        ) {
+          mergedTemplates['alloc-food'] = {
+            ...defaultTpls['alloc-food'],
+            orientation: curFood?.orientation || defaultTpls['alloc-food'].orientation,
+            fontSizePt: curFood?.fontSizePt || defaultTpls['alloc-food'].fontSizePt,
+            marginTopMm: curFood?.marginTopMm ?? defaultTpls['alloc-food'].marginTopMm,
+            marginRightMm: curFood?.marginRightMm ?? defaultTpls['alloc-food'].marginRightMm,
+            marginBottomMm: curFood?.marginBottomMm ?? defaultTpls['alloc-food'].marginBottomMm,
+            marginLeftMm: curFood?.marginLeftMm ?? defaultTpls['alloc-food'].marginLeftMm,
+            columnLabels: curFood?.columnLabels || {},
+            hiddenColumns: curFood?.hiddenColumns || [],
+          };
+        } else {
+          mergedTemplates['alloc-food'] = {
+            ...curFood,
+            hideTopMemoRow: curFood.hideTopMemoRow ?? true,
+          };
+        }
+        localStorage.setItem(ALLOC_ORDER_V2_MIGRATION_KEY, '1');
+      }
+
       let dbObj: AllocationDatabase = {
         ...emptyBase,
         ...parsed,
+        millers: Array.isArray(parsed.millers) ? parsed.millers : [],
+        allocOrderForms: parsed.allocOrderForms || {},
         officer,
         templates: mergedTemplates,
       };
@@ -300,6 +401,7 @@ function loadInitialDatabase(): AllocationDatabase {
     localStorage.setItem(PURGE_SAMPLE_MIGRATION_KEY, '1');
     localStorage.setItem(MONTHLY_NO_COPY_MIGRATION_KEY, '1');
     localStorage.setItem(CHALLAN_SIGN_EQUAL_MIGRATION_KEY, '1');
+    localStorage.setItem(ALLOC_ORDER_V2_MIGRATION_KEY, '1');
     localStorage.setItem(STORAGE_DB_KEY, JSON.stringify(initial));
   } catch {
     // ignore quota error
@@ -372,6 +474,7 @@ function loadInitialSheetsConfig(): AllocationSheetsConfig {
 export interface ActionResult {
   ok: boolean;
   message?: string;
+  warning?: string;
   error?: string;
 }
 
@@ -1129,6 +1232,7 @@ export function useAllocationStore() {
         salesCenter: string;
         cardCount: number;
         unusedCards: number;
+        openingStock?: number;
         allocationQty: number;
         totalAmount: number;
         taxAmount: number;
@@ -1167,6 +1271,7 @@ export function useAllocationStore() {
         salesCenter: r.salesCenter,
         cardCount: Math.round(r.cardCount || 0),
         unusedCards: Math.round(r.unusedCards || 0),
+        openingStock: r.openingStock && r.openingStock > 0 ? round3(r.openingStock) : undefined,
         allocationQty: round3(r.allocationQty),
         totalAmount: round2(r.totalAmount),
         taxAmount: round2(r.taxAmount),
@@ -1489,8 +1594,9 @@ export function useAllocationStore() {
       }
 
       const targetDoNo = (input.doNo || '').trim();
-      if (targetDoNo) {
-        const targetDo = db.doIssues.find((d) => normMemoNo(d.doNo) === normMemoNo(targetDoNo));
+      const targetDoNorm = normDoNo(targetDoNo);
+      if (targetDoNorm) {
+        const targetDo = db.doIssues.find((d) => normDoNo(d.doNo) === targetDoNorm);
         if (targetDo) {
           if (targetDo.category !== input.category) {
             return {
@@ -1528,8 +1634,8 @@ export function useAllocationStore() {
       }
 
       // Preserve same-row pairing (sourceRowId / dealerAllocationId) when linking tax challan to an existing DO or main challan
-      const pairedTargetDo = targetDoNo
-        ? db.doIssues.find((d) => normMemoNo(d.doNo) === normMemoNo(targetDoNo))
+      const pairedTargetDo = targetDoNorm
+        ? db.doIssues.find((d) => normDoNo(d.doNo) === targetDoNorm)
         : undefined;
       const counterpartType: ChallanRecord['challanType'] =
         input.challanType === 'আয়কর চালান' ? 'মূল চালান' : 'আয়কর চালান';
@@ -1538,7 +1644,7 @@ export function useAllocationStore() {
           c.challanType === counterpartType &&
           c.category === input.category &&
           isSamePartyName(c.dealerName, input.dealerName) &&
-          ((targetDoNo && c.doNo && normMemoNo(c.doNo) === normMemoNo(targetDoNo)) ||
+          ((targetDoNorm && c.doNo && normDoNo(c.doNo) === targetDoNorm) ||
             (input.dealerAllocationId &&
               c.dealerAllocationId &&
               normMemoNo(c.dealerAllocationId) === normMemoNo(input.dealerAllocationId)) ||
@@ -1644,6 +1750,144 @@ export function useAllocationStore() {
     });
   }, [recordAutoSnapshot]);
 
+  const relinkChallan = useCallback(
+    (
+      challanId: string,
+      target: { dealerAllocationId?: string; doNo?: string; clearLink?: boolean }
+    ): ActionResult => {
+      const targetChallan = db.challans.find((c) => c.id === challanId);
+      if (!targetChallan) {
+        return { ok: false, error: 'চালান রেকর্ডটি পাওয়া যায়নি।' };
+      }
+
+      const normChNo = normChallanNo(targetChallan.challanNo);
+      const nextSubId = (target.dealerAllocationId || '').trim();
+      const nextDoNoRaw = (target.doNo || '').trim();
+      const nextDoNorm = normDoNo(nextDoNoRaw);
+
+      if (!target.clearLink && nextSubId) {
+        const subMeta =
+          db.dealerSuballocations.find((s) => normMemoNo(s.id) === normMemoNo(nextSubId)) ||
+          db.unoSuballocations.find((u) => normMemoNo(u.id) === normMemoNo(nextSubId));
+        if (subMeta && subMeta.category !== targetChallan.category) {
+          return {
+            ok: false,
+            error: `ভিন্ন খাতের বরাদ্দে (${subMeta.category}) এই চালান (${targetChallan.category}) লিংক করা যাবে না।`,
+          };
+        }
+      }
+
+      let resolvedDoDate: string | undefined;
+      if (!target.clearLink && nextDoNorm) {
+        const targetDo = db.doIssues.find((d) => normDoNo(d.doNo) === nextDoNorm);
+        if (targetDo) {
+          if (targetDo.category !== targetChallan.category) {
+            return {
+              ok: false,
+              error: `ডিও নং ${toBnDigits(targetDo.doNo)} ভিন্ন খাতের (${targetDo.category})।`,
+            };
+          }
+          resolvedDoDate = targetDo.issueDate;
+        }
+      }
+
+      touchedMainChallansRef.current = true;
+      recordAutoSnapshot(dbRef.current, 'চালান লিংক পরিবর্তনের আগে');
+
+      if (target.clearLink) {
+        saveManualChallanLock(targetChallan, { unlocked: true });
+      } else {
+        saveManualChallanLock(targetChallan, {
+          dealerAllocationId: nextSubId || undefined,
+          doNo: nextDoNoRaw || undefined,
+        });
+      }
+
+      setDb((prev) => {
+        const subMatch = nextSubId
+          ? prev.dealerSuballocations.find((s) => normMemoNo(s.id) === normMemoNo(nextSubId))
+          : undefined;
+        const unoMatch = nextSubId && !subMatch
+          ? prev.unoSuballocations.find((u) => normMemoNo(u.id) === normMemoNo(nextSubId))
+          : undefined;
+        const resolvedSubIdVal = target.clearLink
+          ? undefined
+          : subMatch?.id || unoMatch?.id || nextSubId || undefined;
+        const resolvedDealerName =
+          targetChallan.dealerName && targetChallan.dealerName !== '—'
+            ? targetChallan.dealerName
+            : subMatch?.dealerName || unoMatch?.recipientName || targetChallan.dealerName;
+
+        const cleanedDos = prev.doIssues.map((d) => {
+          const isSameDoTarget = !target.clearLink && nextDoNorm && normDoNo(d.doNo) === nextDoNorm;
+          if (targetChallan.challanType === 'মূল চালান') {
+            const heldThis = Boolean(normChNo && d.challanNo && normChallanNo(d.challanNo) === normChNo);
+            if (isSameDoTarget) {
+              return {
+                ...d,
+                dealerAllocationId: resolvedSubIdVal || d.dealerAllocationId,
+                challanNo: targetChallan.challanNo,
+                challanDate: targetChallan.challanDate,
+                challanAmount: targetChallan.depositedAmount,
+              };
+            }
+            if (heldThis) {
+              return { ...d, challanNo: undefined, challanDate: undefined, challanAmount: undefined };
+            }
+          } else {
+            const heldThis = Boolean(normChNo && d.taxChallanNo && normChallanNo(d.taxChallanNo) === normChNo);
+            if (isSameDoTarget) {
+              return {
+                ...d,
+                dealerAllocationId: resolvedSubIdVal || d.dealerAllocationId,
+                taxChallanNo: targetChallan.challanNo,
+                taxChallanDate: targetChallan.challanDate,
+                taxChallanAmount: targetChallan.depositedAmount,
+              };
+            }
+            if (heldThis) {
+              return { ...d, taxChallanNo: undefined, taxChallanDate: undefined, taxChallanAmount: undefined };
+            }
+          }
+          return d;
+        });
+
+        const updatedChallans = prev.challans.map((c) => {
+          if (c.id !== challanId) return c;
+          if (target.clearLink) {
+            return {
+              ...c,
+              dealerAllocationId: undefined,
+              doNo: undefined,
+              doDate: undefined,
+            };
+          }
+          return {
+            ...c,
+            dealerName: resolvedDealerName,
+            dealerAllocationId: resolvedSubIdVal,
+            doNo: nextDoNoRaw || undefined,
+            doDate: nextDoNoRaw ? resolvedDoDate || c.doDate : undefined,
+          };
+        });
+
+        return reconcileChallansAndDOs({
+          ...prev,
+          challans: updatedChallans,
+          doIssues: cleanedDos,
+        });
+      });
+
+      return {
+        ok: true,
+        message: target.clearLink
+          ? `চালান নং ${toBnDigits(targetChallan.challanNo)} লিংক থেকে মুক্ত করা হয়েছে।`
+          : `চালান নং ${toBnDigits(targetChallan.challanNo)} নির্বাচিত বরাদ্দে লক করা হয়েছে।`,
+      };
+    },
+    [db.challans, db.dealerSuballocations, db.doIssues, db.unoSuballocations, recordAutoSnapshot]
+  );
+
   const verifyChallanForRecipient = useCallback(
     (
       category: AllocationCategory,
@@ -1715,17 +1959,28 @@ export function useAllocationStore() {
       const usedDoNos = new Set<string>();
       for (const d of db.doIssues) {
         if (opts?.excludeDoId && d.id === opts.excludeDoId) continue;
-        if (d.doNo) usedDoNos.add(normMemoNo(d.doNo));
-        if (d.challanNo) usedMainNos.add(normChallanNo(d.challanNo));
-        if (d.taxChallanNo) usedTaxNos.add(normChallanNo(d.taxChallanNo));
+        const dKey = normDoNo(d.doNo);
+        if (dKey) usedDoNos.add(dKey);
+        if (d.challanNo && isChallanOnOrBeforeDo(d.challanDate, d.issueDate, false)) {
+          usedMainNos.add(normChallanNo(d.challanNo));
+        }
+        if (d.taxChallanNo && isChallanOnOrBeforeDo(d.taxChallanDate, d.issueDate, false)) {
+          usedTaxNos.add(normChallanNo(d.taxChallanNo));
+        }
       }
+
+      const reqSubNorm = opts?.subId ? normMemoNo(opts.subId) : '';
+      const excludeDoNoNorm = opts?.excludeDoId
+        ? normDoNo(db.doIssues.find((d) => d.id === opts.excludeDoId)?.doNo)
+        : '';
 
       const isChallanAlreadyUsed = (c: ChallanRecord): boolean => {
         if (opts?.excludeChallanIds?.has(c.id)) return true;
         const cNo = normChallanNo(c.challanNo);
         if (c.challanType === 'মূল চালান' && cNo && usedMainNos.has(cNo)) return true;
         if (c.challanType === 'আয়কর চালান' && cNo && usedTaxNos.has(cNo)) return true;
-        if (c.doNo && usedDoNos.has(normMemoNo(c.doNo))) return true;
+        const cDoKey = normDoNo(c.doNo);
+        if (cDoKey && (!excludeDoNoNorm || cDoKey !== excludeDoNoNorm)) return true;
         return false;
       };
 
@@ -1735,23 +1990,70 @@ export function useAllocationStore() {
         return digits ? Number(digits) : Number.MAX_SAFE_INTEGER;
       };
 
+      const getEffectiveChallanDealer = (c: ChallanRecord): string => {
+        if (c.dealerName && c.dealerName !== '—') return c.dealerName;
+        if (c.dealerAllocationId) {
+          const targetNorm = normMemoNo(c.dealerAllocationId);
+          const linkedDealer = db.dealerSuballocations.find(
+            (s) => normMemoNo(s.id) === targetNorm
+          );
+          if (linkedDealer && (!c.category || linkedDealer.category === c.category)) {
+            return linkedDealer.dealerName;
+          }
+          const linkedUno = db.unoSuballocations.find(
+            (u) => normMemoNo(u.id) === targetNorm
+          );
+          if (linkedUno && (!c.category || linkedUno.category === c.category)) {
+            return linkedUno.recipientName;
+          }
+        }
+        return '';
+      };
+
+      const getSourcePairBaseId = (c?: ChallanRecord): string => {
+        if (!c) return '';
+        const raw = (
+          c.sourceRowId ||
+          (!c.id.startsWith('ch-ext-') && !c.id.startsWith('ch-rec-') && !c.id.startsWith('ch-paste-')
+            ? c.id
+            : '')
+        ).trim();
+        return raw ? raw.replace(/-(TAX|MAIN)$/i, '').trim() : '';
+      };
+
       const pickChallan = (
-        type: ChallanRecord['challanType']
-      ): { chosen?: ChallanRecord; hadUsedOnly: boolean; hadPostDatedOnly: boolean } => {
-        // Strict: same category AND same dealer/institution/person ONLY (never cross-category or cross-dealer)
-        const samePartyAndCat = db.challans.filter(
-          (c) =>
-            c.challanType === type &&
-            c.category === category &&
-            isSamePartyName(c.dealerName, dealerName)
-        );
+        type: ChallanRecord['challanType'],
+        pairedSourceBaseId?: string
+      ): { chosen?: ChallanRecord; hadUsedOnly: boolean; hadPostDatedOnly: boolean; hadOtherLockedOnly: boolean } => {
+        // Strict Allocation Lock:
+        // 1) A challan linked to a dealerAllocationId is LOCKED there and NEVER searches/matches any other allocation.
+        // 2) Same category & same dealer/institution/person ONLY (never cross-category or cross-dealer).
+        const samePartyAndCat = db.challans.filter((c) => {
+          if (c.challanType !== type || c.category !== category) return false;
+          const cSubNorm = normMemoNo(c.dealerAllocationId);
+          if (cSubNorm && (!reqSubNorm || cSubNorm !== reqSubNorm)) {
+            return false;
+          }
+          const effDealer = getEffectiveChallanDealer(c);
+          if (cSubNorm && reqSubNorm && cSubNorm === reqSubNorm) {
+            return !effDealer || isSamePartyName(effDealer, dealerName);
+          }
+          return Boolean(effDealer && isSamePartyName(effDealer, dealerName));
+        });
         if (samePartyAndCat.length === 0) {
-          return { chosen: undefined, hadUsedOnly: false, hadPostDatedOnly: false };
+          const hadOtherLockedOnly = db.challans.some((c) => {
+            if (c.challanType !== type || c.category !== category) return false;
+            const cSubNorm = normMemoNo(c.dealerAllocationId);
+            if (!cSubNorm || (reqSubNorm && cSubNorm === reqSubNorm)) return false;
+            const effDealer = getEffectiveChallanDealer(c);
+            return Boolean(effDealer && isSamePartyName(effDealer, dealerName));
+          });
+          return { chosen: undefined, hadUsedOnly: false, hadPostDatedOnly: false, hadOtherLockedOnly };
         }
 
         const unused = samePartyAndCat.filter((c) => !isChallanAlreadyUsed(c));
         if (unused.length === 0) {
-          return { chosen: undefined, hadUsedOnly: true, hadPostDatedOnly: false };
+          return { chosen: undefined, hadUsedOnly: true, hadPostDatedOnly: false, hadOtherLockedOnly: false };
         }
 
         // Strict date rule: challan date must be <= DO issue date (when DO issue date is known)
@@ -1760,32 +2062,68 @@ export function useAllocationStore() {
           : unused.filter((c) => Boolean(toIsoDateStr(c.challanDate)));
 
         if (dateEligible.length === 0) {
-          return { chosen: undefined, hadUsedOnly: false, hadPostDatedOnly: true };
+          return { chosen: undefined, hadUsedOnly: false, hadPostDatedOnly: true, hadOtherLockedOnly: false };
         }
 
-        // Earliest challan maps to earliest DO for the same dealer & category
-        const sorted = [...dateEligible].sort((a, b) => {
-          const isoA = toIsoDateStr(a.challanDate) || '9999-12-31';
-          const isoB = toIsoDateStr(b.challanDate) || '9999-12-31';
-          if (isoA !== isoB) return isoA.localeCompare(isoB);
+        // Earliest challan maps to earliest DO for the same dealer & category;
+        // keep base-ID pairs together, prioritize explicit subId, then UNO-window/qty/deposit fit
+        const targetReqAmt = type === 'মূল চালান' ? reqMain : reqTax;
+        const unoIso = opts?.unoDate ? toIsoDateStr(opts.unoDate) : '';
+        const shiftIsoDays = (iso: string, deltaDays: number): string => {
+          const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+          if (!m) return iso;
+          const dt = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]) + deltaDays));
+          return dt.toISOString().slice(0, 10);
+        };
+        const unoWindowStart = unoIso ? shiftIsoDays(unoIso, -10) : '';
+        const unoMonth = unoIso ? unoIso.slice(0, 7) : '';
 
-          // Same date tie-breaker: direct subId link -> qty proximity -> challan number ASC
+        const sorted = [...dateEligible].sort((a, b) => {
+          if (pairedSourceBaseId) {
+            const pairA = getSourcePairBaseId(a) === pairedSourceBaseId ? 0 : 1;
+            const pairB = getSourcePairBaseId(b) === pairedSourceBaseId ? 0 : 1;
+            if (pairA !== pairB) return pairA - pairB;
+          }
+
           if (opts?.subId) {
             const subA = a.dealerAllocationId && normMemoNo(a.dealerAllocationId) === normMemoNo(opts.subId) ? 0 : 1;
             const subB = b.dealerAllocationId && normMemoNo(b.dealerAllocationId) === normMemoNo(opts.subId) ? 0 : 1;
             if (subA !== subB) return subA - subB;
           }
+
+          const isoA = toIsoDateStr(a.challanDate) || '9999-12-31';
+          const isoB = toIsoDateStr(b.challanDate) || '9999-12-31';
+
+          if (unoWindowStart) {
+            const inWinA = (isoA >= unoWindowStart && (!targetDoDate || isoA <= targetDoDate)) || (unoMonth && isoA.slice(0, 7) === unoMonth) ? 0 : 1;
+            const inWinB = (isoB >= unoWindowStart && (!targetDoDate || isoB <= targetDoDate)) || (unoMonth && isoB.slice(0, 7) === unoMonth) ? 0 : 1;
+            if (inWinA !== inWinB) return inWinA - inWinB;
+          }
+
+          const qMatchA = a.allocationQty && allocationQty > 0 && Math.abs(a.allocationQty - allocationQty) <= 0.05 ? 0 : 1;
+          const qMatchB = b.allocationQty && allocationQty > 0 && Math.abs(b.allocationQty - allocationQty) <= 0.05 ? 0 : 1;
+          if (qMatchA !== qMatchB) return qMatchA - qMatchB;
+
+          if (targetReqAmt > 0) {
+            const sufA = a.depositedAmount + 0.01 >= targetReqAmt ? 0 : 1;
+            const sufB = b.depositedAmount + 0.01 >= targetReqAmt ? 0 : 1;
+            if (sufA !== sufB) return sufA - sufB;
+          }
+
+          if (isoA !== isoB) return isoA.localeCompare(isoB);
+
           const qDiffA = a.allocationQty ? Math.abs(a.allocationQty - allocationQty) : 999;
           const qDiffB = b.allocationQty ? Math.abs(b.allocationQty - allocationQty) : 999;
           if (Math.abs(qDiffA - qDiffB) > 0.001) return qDiffA - qDiffB;
           return challanNumSortVal(a.challanNo) - challanNumSortVal(b.challanNo);
         });
 
-        return { chosen: sorted[0], hadUsedOnly: false, hadPostDatedOnly: false };
+        return { chosen: sorted[0], hadUsedOnly: false, hadPostDatedOnly: false, hadOtherLockedOnly: false };
       };
 
       const mainRes = pickChallan('মূল চালান');
-      const taxRes = pickChallan('আয়কর চালান');
+      const pairedMainBaseId = getSourcePairBaseId(mainRes.chosen);
+      const taxRes = pickChallan('আয়কর চালান', pairedMainBaseId || undefined);
       const mainC = mainRes.chosen;
       const taxC = taxRes.chosen;
 
@@ -1795,6 +2133,8 @@ export function useAllocationStore() {
           errs.push('এই ডিলারের মূল চালান ইতিমধ্যে অন্য ডিও-তে ব্যবহৃত হয়েছে');
         } else if (mainRes.hadPostDatedOnly) {
           errs.push('মূল চালানের তারিখ ডিও ইস্যুর তারিখের পরে হওয়ায় সংযুক্ত করা যায়নি');
+        } else if (mainRes.hadOtherLockedOnly) {
+          errs.push('মূল চালান অন্য বরাদ্দে লক করা আছে (প্রয়োজনে ম্যানুয়ালি পরিবর্তন করুন)');
         } else {
           errs.push('একই খাত ও ডিলারের মূল চালান পাওয়া যায়নি');
         }
@@ -1808,6 +2148,8 @@ export function useAllocationStore() {
             errs.push('এই ডিলারের আয়কর চালান ইতিমধ্যে অন্য ডিও-তে ব্যবহৃত হয়েছে');
           } else if (taxRes.hadPostDatedOnly) {
             errs.push('আয়কর চালানের তারিখ ডিও ইস্যুর তারিখের পরে হওয়ায় সংযুক্ত করা যায়নি');
+          } else if (taxRes.hadOtherLockedOnly) {
+            errs.push('আয়কর চালান অন্য বরাদ্দে লক করা আছে (প্রয়োজনে ম্যানুয়ালি পরিবর্তন করুন)');
           } else {
             errs.push('একই খাত ও ডিলারের আয়কর চালান পাওয়া যায়নি');
           }
@@ -1826,7 +2168,7 @@ export function useAllocationStore() {
         errors: errs,
       };
     },
-    [db.challans, db.dcAllocations, db.dealerSuballocations, db.doIssues, db.ministryAllocations, db.rates]
+    [db.challans, db.dcAllocations, db.dealerSuballocations, db.doIssues, db.ministryAllocations, db.rates, db.unoSuballocations]
   );
 
   const issueDOBatch = useCallback(
@@ -1848,28 +2190,37 @@ export function useAllocationStore() {
       }>
     ): ActionResult => {
       if (!items.length) return { ok: false, error: 'কোনো ডিও নম্বর দেওয়া হয়নি।' };
-      const existingSet = new Set(db.doIssues.map((d) => String(d.doNo).trim()));
+      const existingSet = new Set(db.doIssues.map((d) => normDoNo(d.doNo)).filter(Boolean));
       const batchSet = new Set<string>();
       for (const it of items) {
         const dNo = it.doNo.trim();
-        if (!dNo || !it.issueDate) {
+        const dKey = normDoNo(dNo);
+        if (!dKey || !it.issueDate) {
           return { ok: false, error: 'প্রতিটি নির্বাচিত প্রাপকের জন্য ডিও নং এবং তারিখ দিন।' };
         }
-        if (existingSet.has(dNo)) {
+        if (existingSet.has(dKey)) {
           return { ok: false, error: `ডিও নং ${toBnDigits(dNo)} আগেই ইস্যু করা হয়েছে!` };
         }
-        if (batchSet.has(dNo)) {
+        if (batchSet.has(dKey)) {
           return { ok: false, error: `একই ডিও নং ${toBnDigits(dNo)} দুইবার লেখা হয়েছে!` };
         }
-        batchSet.add(dNo);
+        batchSet.add(dKey);
       }
 
-      // একাধিক ডিও ইস্যুর ক্ষেত্রে একই ডিলারের সবচেয়ে আগের ডিও-তে সবচেয়ে আগের চালান ১-থেকে-১ বরাদ্দ হবে
+      // একাধিক ডিও ইস্যুর ক্ষেত্রে direct subId-যুক্ত বা সমমাসিক আইটেম আগে প্রসেস হবে যাতে পূর্বের খালি আইটেম পরের চালান না নেয়
       const doNumVal = (no: string): number => {
         const digits = bnToEnDigits(no || '').replace(/\D/g, '');
         return digits ? Number(digits) : Number.MAX_SAFE_INTEGER;
       };
+      const hasDirectSubChallan = (subId?: string): number => {
+        const sn = normMemoNo(subId);
+        if (!sn) return 1;
+        return db.challans.some((c) => c.dealerAllocationId && normMemoNo(c.dealerAllocationId) === sn) ? 0 : 1;
+      };
       const sortedItems = [...items].sort((a, b) => {
+        const subRankA = hasDirectSubChallan(a.subId);
+        const subRankB = hasDirectSubChallan(b.subId);
+        if (subRankA !== subRankB) return subRankA - subRankB;
         const isoA = toIsoDateStr(a.issueDate) || '9999-12-31';
         const isoB = toIsoDateStr(b.issueDate) || '9999-12-31';
         if (isoA !== isoB) return isoA.localeCompare(isoB);
@@ -1877,6 +2228,7 @@ export function useAllocationStore() {
       });
 
       const batchUsedChallanIds = new Set<string>();
+      const warnings: string[] = [];
       const now = new Date().toISOString();
       const created: DOIssue[] = sortedItems.map((it) => {
         const check = verifyChallanForRecipient(it.category, it.recipientName, it.allocationQty, {
@@ -1889,6 +2241,11 @@ export function useAllocationStore() {
         });
         if (check.mainChallan) batchUsedChallanIds.add(check.mainChallan.id);
         if (check.taxChallan) batchUsedChallanIds.add(check.taxChallan.id);
+        if (check.applicable && !check.ok && check.errors && check.errors.length > 0) {
+          warnings.push(
+            `${it.recipientName} (ডিও ${toBnDigits(it.doNo)}): ${check.errors.join(', ')}`
+          );
+        }
 
         return {
           id: uid('do'),
@@ -1925,6 +2282,7 @@ export function useAllocationStore() {
       return {
         ok: true,
         message: `${toBnDigits(created.length)} টি ডিও সফলভাবে ইস্যু হয়েছে।`,
+        warning: warnings.length > 0 ? warnings.join(' · ') : undefined,
       };
     },
     [db.doIssues, verifyChallanForRecipient]
@@ -1940,25 +2298,40 @@ export function useAllocationStore() {
       const nextDoNo = (patch.doNo ?? existing.doNo).trim();
       const nextDate = (patch.issueDate ?? existing.issueDate).trim();
       const nextQty = round3(patch.allocationQty ?? existing.allocationQty);
-      if (!nextDoNo || !nextDate) {
+      const nextDoKey = normDoNo(nextDoNo);
+      if (!nextDoKey || !nextDate) {
         return { ok: false, error: 'ডিও নং এবং তারিখ পূরণ করুন।' };
       }
       if (nextQty <= 0) {
         return { ok: false, error: 'ডিও পরিমাণ ০-এর বেশি হতে হবে।' };
       }
-      if (
-        nextDoNo !== existing.doNo &&
-        db.doIssues.some((d) => d.id !== id && String(d.doNo).trim() === nextDoNo)
-      ) {
+      if (db.doIssues.some((d) => d.id !== id && normDoNo(d.doNo) === nextDoKey)) {
         return { ok: false, error: `ডিও নং ${toBnDigits(nextDoNo)} আগেই ইস্যু করা হয়েছে!` };
       }
-      setDb((prev) =>
-        reconcileChallansAndDOs({
+      setDb((prev) => {
+        const mainKey = existing.challanNo ? normChallanNo(existing.challanNo) : '';
+        const taxKey = existing.taxChallanNo ? normChallanNo(existing.taxChallanNo) : '';
+        const oldDoKey = normDoNo(existing.doNo);
+        const mainDateOk = isChallanOnOrBeforeDo(existing.challanDate, nextDate, false);
+        const taxDateOk = isChallanOnOrBeforeDo(existing.taxChallanDate, nextDate, false);
+        const syncedChallans = prev.challans.map((c) => {
+          const cNoKey = normChallanNo(c.challanNo);
+          const cDoKey = normDoNo(c.doNo);
+          if (c.category !== existing.category) return c;
+          const isMainOfThis = c.challanType === 'মূল চালান' && ((mainKey && cNoKey === mainKey) || (oldDoKey && cDoKey === oldDoKey));
+          const isTaxOfThis = c.challanType === 'আয়কর চালান' && ((taxKey && cNoKey === taxKey) || (oldDoKey && cDoKey === oldDoKey));
+          if (!isMainOfThis && !isTaxOfThis) return c;
+          const keepPinned = isMainOfThis ? mainDateOk : taxDateOk;
+          if (!keepPinned) {
+            return { ...c, doNo: undefined, doDate: undefined };
+          }
+          return { ...c, doNo: nextDoNo, doDate: nextDate };
+        });
+        return reconcileChallansAndDOs({
           ...prev,
+          challans: syncedChallans,
           doIssues: prev.doIssues.map((d) => {
             if (d.id !== id) return d;
-            const mainDateOk = isChallanOnOrBeforeDo(d.challanDate, nextDate, false);
-            const taxDateOk = isChallanOnOrBeforeDo(d.taxChallanDate, nextDate, false);
             return {
               ...d,
               doNo: nextDoNo,
@@ -1972,20 +2345,38 @@ export function useAllocationStore() {
               taxChallanAmount: taxDateOk ? d.taxChallanAmount : undefined,
             };
           }),
-        })
-      );
+        });
+      });
       return { ok: true, message: 'ডিও তথ্য হালনাগাদ হয়েছে।' };
     },
     [db.doIssues]
   );
 
   const deleteDOIssue = useCallback((id: string) => {
-    setDb((prev) =>
-      reconcileChallansAndDOs({
+    setDb((prev) => {
+      const target = prev.doIssues.find((d) => d.id === id);
+      const targetDoKey = target ? normDoNo(target.doNo) : '';
+      const targetMainKey = target?.challanNo ? normChallanNo(target.challanNo) : '';
+      const targetTaxKey = target?.taxChallanNo ? normChallanNo(target.taxChallanNo) : '';
+      const cleanedChallans = target
+        ? prev.challans.map((c) => {
+            if (c.category !== target.category) return c;
+            const cDoKey = normDoNo(c.doNo);
+            const cNoKey = normChallanNo(c.challanNo);
+            const matchesDeletedDo =
+              (targetDoKey && cDoKey === targetDoKey) ||
+              (c.challanType === 'মূল চালান' && targetMainKey && cNoKey === targetMainKey) ||
+              (c.challanType === 'আয়কর চালান' && targetTaxKey && cNoKey === targetTaxKey);
+            if (!matchesDeletedDo) return c;
+            return { ...c, doNo: undefined, doDate: undefined };
+          })
+        : prev.challans;
+      return reconcileChallansAndDOs({
         ...prev,
+        challans: cleanedChallans,
         doIssues: prev.doIssues.filter((d) => d.id !== id),
-      })
-    );
+      });
+    });
   }, []);
 
   const saveFoodDealer = useCallback((dealer: Omit<FoodDealer, 'id'>, existingId?: string) => {
@@ -2031,6 +2422,28 @@ export function useAllocationStore() {
     setDb((prev) => ({ ...prev, omsDealers: prev.omsDealers.filter((d) => d.id !== id) }));
   }, []);
 
+  const updateDealerTcbCards = useCallback(
+    (updates: Array<{ kind: 'food' | 'oms'; id: string; tcbCardCount: number }>) => {
+      const foodMap = new Map<string, number>();
+      const omsMap = new Map<string, number>();
+      for (const u of updates) {
+        const val = Math.max(0, Math.round(Number(u.tcbCardCount) || 0));
+        if (u.kind === 'food') foodMap.set(u.id, val);
+        else omsMap.set(u.id, val);
+      }
+      setDb((prev) => ({
+        ...prev,
+        foodDealers: prev.foodDealers.map((d) =>
+          foodMap.has(d.id) ? { ...d, tcbCardCount: foodMap.get(d.id)! } : d
+        ),
+        omsDealers: prev.omsDealers.map((d) =>
+          omsMap.has(d.id) ? { ...d, tcbCardCount: omsMap.get(d.id)! } : d
+        ),
+      }));
+    },
+    []
+  );
+
   const saveChairman = useCallback((item: Omit<ChairmanEntry, 'id'>, existingId?: string) => {
     setDb((prev) => {
       if (existingId) {
@@ -2063,6 +2476,26 @@ export function useAllocationStore() {
 
   const deleteFireService = useCallback((id: string) => {
     setDb((prev) => ({ ...prev, fireServices: prev.fireServices.filter((f) => f.id !== id) }));
+  }, []);
+
+  const saveMiller = useCallback((item: Omit<MillerEntry, 'id'>, existingId?: string) => {
+    setDb((prev) => {
+      const list = prev.millers || [];
+      if (existingId) {
+        return {
+          ...prev,
+          millers: list.map((m) => (m.id === existingId ? { ...item, id: existingId } : m)),
+        };
+      }
+      return { ...prev, millers: [...list, { ...item, id: uid('ml') }] };
+    });
+  }, []);
+
+  const deleteMiller = useCallback((id: string) => {
+    setDb((prev) => ({
+      ...prev,
+      millers: (prev.millers || []).filter((m) => m.id !== id),
+    }));
   }, []);
 
   const saveRate = useCallback((category: AllocationCategory, unitPrice: number, taxRate: number) => {
@@ -2132,6 +2565,33 @@ export function useAllocationStore() {
       ...prev,
       reportMemos: { ...prev.reportMemos, [key]: { no, date } },
     }));
+  }, []);
+
+  const saveAllocOrderForm = useCallback((key: string, patch: Partial<AllocOrderFormFields>) => {
+    setDb((prev) => {
+      const cur = prev.allocOrderForms?.[key] || {
+        ministryDate: '',
+        ministryMemo: '',
+        dcDate: '',
+        dcMemo: '',
+        dfcMonth: '',
+        dfcDate: '',
+        dfcMemo: '',
+        targetMonth: '',
+        deadlineDate: '',
+        ownMemoSuffix: '',
+        bangabdaDate: '',
+        ownDate: '',
+        copyMillerText: '',
+      };
+      return {
+        ...prev,
+        allocOrderForms: {
+          ...(prev.allocOrderForms || {}),
+          [key]: { ...cur, ...patch },
+        },
+      };
+    });
   }, []);
 
   const syncFromGoogleSheet = useCallback(
@@ -2249,6 +2709,10 @@ export function useAllocationStore() {
           };
         }
 
+        nextDb = {
+          ...nextDb,
+          challans: applyManualChallanLocks(nextDb.challans),
+        };
         nextDb = reconcileChallansAndDOs(nextDb);
         if (countAllocationDatabaseRecords(nextDb) > 0) {
           hadNonEmptyDbRef.current = true;
@@ -3101,6 +3565,7 @@ export function useAllocationStore() {
     deleteDOBook,
     saveChallan,
     deleteChallan,
+    relinkChallan,
     verifyChallanForRecipient,
     issueDOBatch,
     updateDOIssue,
@@ -3109,16 +3574,20 @@ export function useAllocationStore() {
     deleteFoodDealer,
     saveOMSDealer,
     deleteOMSDealer,
+    updateDealerTcbCards,
     saveChairman,
     deleteChairman,
     saveFireService,
     deleteFireService,
+    saveMiller,
+    deleteMiller,
     saveRate,
     deleteRate,
     updateOfficerProfile,
     updateReportTemplate,
     resetReportTemplate,
     saveReportMemo,
+    saveAllocOrderForm,
     handleGoogleSignIn,
     handleGoogleSignOut,
     cancelGoogleSignIn,

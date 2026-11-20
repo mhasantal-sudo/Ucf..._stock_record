@@ -77,6 +77,8 @@ export async function listUserSpreadsheets(
 export interface SpreadsheetMetadata {
   spreadsheetId: string;
   title: string;
+  locale?: string;
+  timeZone?: string;
   sheetTitles: string[];
   sheetIdMap: Record<string, number>;
 }
@@ -91,9 +93,9 @@ export async function getSpreadsheetMetadata(
   }
   const url = `${SHEETS_API_BASE}/${encodeURIComponent(
     spreadsheetId
-  )}?fields=properties.title,sheets(properties(sheetId,title))`;
+  )}?fields=properties(title,locale,timeZone),sheets(properties(sheetId,title))`;
   const data = await googleApiFetch<{
-    properties?: { title?: string };
+    properties?: { title?: string; locale?: string; timeZone?: string };
     sheets?: Array<{ properties?: { sheetId?: number; title?: string } }>;
   }>(url, accessToken);
 
@@ -113,6 +115,8 @@ export async function getSpreadsheetMetadata(
   return {
     spreadsheetId,
     title: data.properties?.title || spreadsheetId,
+    locale: data.properties?.locale,
+    timeZone: data.properties?.timeZone,
     sheetTitles,
     sheetIdMap,
   };
@@ -307,10 +311,14 @@ export async function getPublicSpreadsheetMetadata(
     }
   }
 
+  const localeMatch = html.match(/["']locale["']\s*[:=]\s*["']([a-z]{2}_[A-Z]{2})["']/);
+  const locale = localeMatch?.[1];
+
   return {
     meta: {
       spreadsheetId,
       title,
+      locale,
       sheetTitles,
       sheetIdMap,
     },
